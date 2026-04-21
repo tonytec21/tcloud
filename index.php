@@ -1056,33 +1056,129 @@ const CV = {
     },
 
     async trashItems(items) {
-        const ok = await this.confirm('Mover para lixeira', 'Os itens selecionados serão movidos para a lixeira.', 'Mover');
+        const ok = await this.confirm('Mover para lixeira', items.length + ' item(ns) será(ão) movido(s) para a lixeira.', 'Mover');
         if (!ok) return;
-        const result = await this.api('trash', { items: JSON.stringify(items) });
-        this.toast(result.message, result.success ? 'success' : 'error');
-        if (result.success) { this.clearSelection(); this.refresh(); }
+        this.clearSelection();
+        await this._processItems(items, 'trash', 'Movendo para lixeira', 'bi-trash3', false);
+        this.state._pollHash = '';
     },
 
     async restoreItems(items) {
-        const result = await this.api('restore', { items: JSON.stringify(items) });
-        this.toast(result.message, result.success ? 'success' : 'error');
-        if (result.success) this.loadTrash();
+        await this._processItems(items, 'restore', 'Restaurando', 'bi-arrow-counterclockwise', false);
+        this.loadTrash();
     },
 
     async deletePermanent(items) {
-        const ok = await this.confirm('Excluir permanentemente', 'Esta ação não pode ser desfeita! Os arquivos serão removidos para sempre.', 'Excluir', true);
+        const ok = await this.confirm('Excluir permanentemente', items.length + ' item(ns) será(ão) removido(s) para sempre. Esta ação não pode ser desfeita!', 'Excluir', true);
         if (!ok) return;
-        const result = await this.api('delete_permanent', { items: JSON.stringify(items) });
-        this.toast(result.message, result.success ? 'success' : 'error');
-        if (result.success) this.loadTrash();
+        await this._processItems(items, 'delete_permanent', 'Excluindo permanentemente', 'bi-x-circle', true);
+        this.loadTrash();
     },
 
     async emptyTrash() {
         const ok = await this.confirm('Esvaziar lixeira', 'Todos os itens da lixeira serão excluídos permanentemente. Esta ação não pode ser desfeita!', 'Esvaziar', true);
         if (!ok) return;
-        const result = await this.api('empty_trash');
-        this.toast(result.message, result.success ? 'success' : 'error');
-        if (result.success) this.loadTrash();
+        // Get all trash items first
+        const data = await this.api('list_trash');
+        if (!data.success) return;
+        const items = [
+            ...(data.folders || []).map(f => ({ type: 'folder', id: f.id, name: f.name })),
+            ...(data.files || []).map(f => ({ type: 'file', id: f.id, name: f.original_name }))
+        ];
+        if (!items.length) { this.toast('Lixeira já está vazia.', 'info'); return; }
+        await this._processItems(items, 'delete_permanent', 'Esvaziando lixeira', 'bi-trash3', true);
+        this.loadTrash();
+    },
+
+    // Generic batch processor with progress panel
+    async _processItems(items, action, title, iconClass, isDanger) {
+        const panel = document.getElementById('uploadPanel');
+        const body = document.getElementById('uploadPanelBody');
+        panel.classList.add('show');
+        body.style.display = '';
+
+        const total = items.length;
+        let completed = 0, errors = 0;
+        const barColor = isDanger ? 'var(--danger)' : 'var(--accent)';
+
+        // Setup header
+        document.getElementById('uqIcon').className = 'bi ' + iconClass;
+        document.getElementById('uqIcon').style.color = isDanger ? 'var(--danger)' : 'var(--accent)';
+        document.getElementById('uqHeaderTitle').textContent = title + ' — 0 / ' + total;
+        document.getElementById('uqHeaderPct').textContent = '0%';
+        const headerBar = document.getElementById('uqHeaderBar');
+        if (headerBar) { headerBar.style.width = '0%'; headerBar.style.background = barColor; }
+        document.getElementById('uqPauseBtn').style.display = 'none';
+        document.getElementById('uqCancelBtn').style.display = 'none';
+        document.getElementById('uqStats').style.display = 'none';
+        const fileList = document.getElementById('uqFileList');
+        fileList.innerHTML = '';
+
+        for (let i = 0; i < items.length; i++) {
+            const item = items[i];
+            const isFolder = item.type === 'folder';
+            // Get item name from state, DOM, or item itself
+            let itemName = item.name || '';
+            if (!itemName) {
+                const stateItem = isFolder
+                    ? (this.state.items.folders || []).find(f => f.id == item.id)
+                    : (this.state.items.files || []).find(f => f.id == item.id);
+                itemName = stateItem ? (stateItem.original_name || stateItem.name) : (item.type + ' #' + item.id);
+            }
+
+            const itemId = 'op_' + i;
+            const icon = isFolder ? 'bi-folder-fill' : 'bi-file-earmark';
+            const iconColor = isFolder ? 'var(--warning)' : 'var(--text-muted)';
+
+            // Add to list
+            fileList.insertAdjacentHTML('afterbegin',
+                '<div class="uq-file-item" id="' + itemId + '">' +
+                '<i class="bi ' + icon + '" style="font-size:16px;color:' + iconColor + '"></i>' +
+                '<div class="uq-info"><div class="uq-name">' + this.esc(itemName) + '</div>' +
+                '<div class="uq-detail">' + (isFolder ? 'Pasta' : 'Arquivo') + '</div></div>' +
+                '<span class="uq-pct" style="color:' + barColor + '"><i class="bi bi-arrow-repeat spin" style="font-size:12px"></i></span></div>');
+            while (fileList.children.length > 30) fileList.removeChild(fileList.lastChild);
+
+            // Process single item
+            try {
+                await this.api(action, { items: JSON.stringify([{ type: item.type, id: item.id }]) });
+                completed++;
+                const el = document.getElementById(itemId);
+                if (el) { el.classList.add('complete'); el.querySelector('.uq-pct').innerHTML = '\u2714'; }
+            } catch (e) {
+                errors++;
+                const el = document.getElementById(itemId);
+                if (el) { el.classList.add('error'); el.querySelector('.uq-pct').innerHTML = '\u2718'; }
+            }
+
+            // Update header
+            const pct = Math.round(((i + 1) / total) * 100);
+            if (headerBar) headerBar.style.width = pct + '%';
+            document.getElementById('uqHeaderTitle').textContent = title + ' — ' + (i + 1) + ' / ' + total;
+            document.getElementById('uqHeaderPct').textContent = pct + '%';
+
+            // Remove item from DOM immediately for visual feedback
+            if (action === 'trash' || action === 'delete_permanent') {
+                const domEl = document.querySelector('.file-item[data-id="' + item.id + '"][data-type="' + item.type + '"], .file-grid-item[data-id="' + item.id + '"][data-type="' + item.type + '"]');
+                if (domEl) domEl.style.opacity = '0.3';
+            }
+        }
+
+        // Final state
+        const finalIcon = errors ? 'bi-exclamation-circle' : 'bi-check-circle-fill';
+        const finalColor = errors ? 'var(--warning)' : 'var(--success)';
+        document.getElementById('uqIcon').className = 'bi ' + finalIcon;
+        document.getElementById('uqIcon').style.color = finalColor;
+        if (headerBar) { headerBar.style.width = '100%'; headerBar.style.background = finalColor; }
+        document.getElementById('uqHeaderTitle').textContent = completed + ' item(ns) processado(s)' + (errors ? ' \u2014 ' + errors + ' erro(s)' : '');
+        document.getElementById('uqHeaderPct').textContent = '100%';
+
+        // Clean up faded items
+        document.querySelectorAll('.file-item, .file-grid-item').forEach(el => {
+            if (el.style.opacity === '0.3') el.remove();
+        });
+
+        this.state._pollHash = '';
     },
 
     async duplicateFile(id) {
