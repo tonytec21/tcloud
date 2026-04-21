@@ -131,6 +131,31 @@ try {
             jsonResponse($fm->createFolder(input('name', ''), input('parent_id') ? (int)input('parent_id') : null));
             break;
 
+        case 'create_folder_path':
+            if (!Auth::can('folders.create')) jsonResponse(['success' => false, 'message' => 'Sem permissão.'], 403);
+            $folderPath = input('path', '');
+            $baseFolderId = input('folder_id') ? (int)input('folder_id') : null;
+            if (empty($folderPath)) jsonResponse(['success' => false, 'message' => 'Caminho vazio.']);
+            $parts = array_filter(array_map('trim', explode('/', $folderPath)));
+            $parentId = $baseFolderId;
+            $db = Database::getInstance();
+            foreach ($parts as $folderName) {
+                if ($folderName === '') continue;
+                $stmt = $db->prepare("SELECT id FROM folders WHERE name = ? AND user_id = ? AND parent_id " . ($parentId ? "= ?" : "IS NULL") . " AND is_trashed = 0");
+                $params = [$folderName, $user['id']];
+                if ($parentId) $params[] = $parentId;
+                $stmt->execute($params);
+                $existing = $stmt->fetch();
+                if ($existing) {
+                    $parentId = (int)$existing['id'];
+                } else {
+                    $result = $fm->createFolder($folderName, $parentId);
+                    if ($result['success']) $parentId = (int)$result['id'];
+                }
+            }
+            jsonResponse(['success' => true, 'folder_id' => $parentId]);
+            break;
+
         case 'create_file':
             if (!Auth::can('files.create_doc')) jsonResponse(['success' => false, 'message' => 'Sem permissão.'], 403);
             jsonResponse($fm->createFile(

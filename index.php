@@ -1130,27 +1130,110 @@ const CV = {
 
     handleFileSelect(files) {
         if (!files.length) return;
-        this.uploadFiles(files);
+        // Collect unique folder paths from webkitRelativePath (for folder input)
+        const emptyDirCheck = new Set();
+        const fileList = [];
+        for (let i = 0; i < files.length; i++) {
+            fileList.push(files[i]);
+            const rp = files[i].webkitRelativePath || '';
+            if (rp) {
+                // Add all parent folder paths
+                const parts = rp.split('/');
+                parts.pop(); // remove filename
+                let path = '';
+                for (const p of parts) {
+                    path += (path ? '/' : '') + p;
+                    emptyDirCheck.add(path);
+                }
+            }
+        }
+        this._startUploadQueue(fileList, Array.from(emptyDirCheck));
         document.getElementById('fileInput').value = '';
         document.getElementById('folderInput').value = '';
     },
 
-    async uploadFiles(files) {
+    // ==================== UPLOAD QUEUE ====================
+    _uploadQueue: [],
+    _uploadRunning: false,
+
+    async _startUploadQueue(files, folderPaths) {
         const panel = document.getElementById('uploadPanel');
         const body = document.getElementById('uploadPanelBody');
         panel.classList.add('show');
-        const CHUNK_SIZE = 50 * 1024 * 1024; // 50MB per chunk
 
+        // Step 1: Create all folder paths first (including empty ones)
+        if (folderPaths && folderPaths.length) {
+            const foldersId = 'upload_folders_' + Date.now();
+            body.insertAdjacentHTML('afterbegin', `
+                <div class="upload-item" id="${foldersId}">
+                    <i class="bi bi-folder-plus" style="font-size:20px;color:var(--text-muted)"></i>
+                    <div class="upload-info">
+                        <div class="upload-name">Criando ${folderPaths.length} pasta(s)...</div>
+                        <div class="upload-progress"><div class="upload-progress-bar" style="width:0%"></div></div>
+                        <div class="upload-status">Preparando...</div>
+                    </div>
+                </div>
+            `);
+            // Create unique folder paths
+            const uniquePaths = [...new Set(folderPaths)].sort();
+            for (let i = 0; i < uniquePaths.length; i++) {
+                await this.api('create_folder_path', { path: uniquePaths[i], folder_id: this.state.currentFolder || '' });
+                const el = document.getElementById(foldersId);
+                if (el) {
+                    const pct = Math.round(((i + 1) / uniquePaths.length) * 100);
+                    el.querySelector('.upload-progress-bar').style.width = pct + '%';
+                    el.querySelector('.upload-status').textContent = (i + 1) + '/' + uniquePaths.length;
+                }
+            }
+            const el = document.getElementById(foldersId);
+            if (el) {
+                el.classList.add('complete');
+                el.querySelector('.upload-status').textContent = 'Pastas criadas';
+                el.querySelector('.upload-progress-bar').style.width = '100%';
+            }
+        }
+
+        // Step 2: Queue all files
+        if (!files.length) { this.refresh(); return; }
+
+        const totalFiles = files.length;
+        const queueHeaderId = 'upload_header_' + Date.now();
+        body.insertAdjacentHTML('afterbegin', `
+            <div class="upload-item" id="${queueHeaderId}" style="background:var(--bg-tertiary)">
+                <i class="bi bi-cloud-arrow-up" style="font-size:20px;color:var(--accent)"></i>
+                <div class="upload-info">
+                    <div class="upload-name" style="font-weight:600">${totalFiles} arquivo(s) na fila</div>
+                    <div class="upload-progress"><div class="upload-progress-bar" style="width:0%"></div></div>
+                    <div class="upload-status" id="queueStatus">Iniciando...</div>
+                </div>
+            </div>
+        `);
+
+        const CHUNK_SIZE = 50 * 1024 * 1024;
+        let completed = 0;
+        let errors = 0;
+
+        // Process one file at a time
         for (let i = 0; i < files.length; i++) {
             const file = files[i];
             const relativePath = file.webkitRelativePath || '';
             const displayName = relativePath || file.name;
             const itemId = 'upload_' + Date.now() + '_' + i;
+
+            // Update queue header
+            const qh = document.getElementById(queueHeaderId);
+            if (qh) {
+                const pct = Math.round((completed / totalFiles) * 100);
+                qh.querySelector('.upload-progress-bar').style.width = pct + '%';
+                qh.querySelector('#queueStatus').textContent = (completed + 1) + ' de ' + totalFiles + ' — ' + this.esc(file.name).substring(0, 40);
+            }
+
+            // Add individual file item
             body.insertAdjacentHTML('afterbegin', `
                 <div class="upload-item" id="${itemId}">
-                    <i class="bi ${relativePath ? 'bi-folder-fill' : 'bi-file-earmark'}" style="font-size:20px;color:var(--text-muted)"></i>
+                    <i class="bi bi-file-earmark" style="font-size:20px;color:var(--text-muted)"></i>
                     <div class="upload-info">
-                        <div class="upload-name">${this.esc(displayName)}</div>
+                        <div class="upload-name" style="font-size:12px">${this.esc(displayName)}</div>
                         <div class="upload-progress"><div class="upload-progress-bar" style="width:0%"></div></div>
                         <div class="upload-status">Enviando...</div>
                     </div>
@@ -1159,17 +1242,26 @@ const CV = {
 
             try {
                 if (file.size > CHUNK_SIZE) {
-                    // ── CHUNKED UPLOAD for large files ──
                     await this._uploadChunked(file, itemId, CHUNK_SIZE);
                 } else {
-                    // ── NORMAL UPLOAD for small files ──
                     await this._uploadNormal(file, itemId);
                 }
+                completed++;
             } catch (e) {
+                errors++;
                 const el = document.getElementById(itemId);
                 if (el) { el.classList.add('error'); el.querySelector('.upload-status').textContent = 'Erro: ' + (e.message||'falha'); }
             }
         }
+
+        // Final status
+        const qh = document.getElementById(queueHeaderId);
+        if (qh) {
+            qh.classList.add('complete');
+            qh.querySelector('.upload-progress-bar').style.width = '100%';
+            qh.querySelector('#queueStatus').textContent = completed + ' enviado(s)' + (errors ? ', ' + errors + ' erro(s)' : '') + ' — Concluído';
+        }
+
         this.refresh();
     },
 
@@ -1294,7 +1386,6 @@ const CV = {
             e.preventDefault();
             area.classList.remove('drag-over');
             counter = 0;
-            // Try to read folder entries (supports Chrome, Edge, etc.)
             const items = e.dataTransfer.items;
             if (items && items.length) {
                 const entries = [];
@@ -1303,26 +1394,29 @@ const CV = {
                     if (entry) entries.push(entry);
                 }
                 if (entries.length && entries.some(en => en.isDirectory)) {
-                    const files = await this._readEntries(entries, '');
-                    if (files.length) { this.uploadFiles(files); return; }
+                    const result = await this._readEntries(entries, '');
+                    this._startUploadQueue(result.files, result.dirs);
+                    return;
                 }
             }
             if (e.dataTransfer.files.length) {
-                this.uploadFiles(e.dataTransfer.files);
+                this._startUploadQueue(Array.from(e.dataTransfer.files), []);
             }
         });
     },
 
-    // Recursively read all files from drag-and-drop entries
+    // Recursively read all files AND empty folder paths from drag-and-drop
     async _readEntries(entries, basePath) {
         const files = [];
+        const dirs = [];
         for (const entry of entries) {
             if (entry.isFile) {
                 const file = await new Promise(r => entry.file(r));
-                // Attach relative path
                 Object.defineProperty(file, 'webkitRelativePath', { value: basePath + file.name });
                 files.push(file);
             } else if (entry.isDirectory) {
+                const dirPath = basePath + entry.name;
+                dirs.push(dirPath);
                 const dirReader = entry.createReader();
                 const children = await new Promise((resolve) => {
                     const all = [];
@@ -1334,11 +1428,16 @@ const CV = {
                     };
                     readBatch();
                 });
-                const sub = await this._readEntries(children, basePath + entry.name + '/');
-                files.push(...sub);
+                if (children.length === 0) {
+                    // Empty folder — just add path, no recursion needed
+                    continue;
+                }
+                const sub = await this._readEntries(children, dirPath + '/');
+                files.push(...sub.files);
+                dirs.push(...sub.dirs);
             }
         }
-        return files;
+        return { files, dirs };
     },
 
     // ==================== DRAG & DROP (mover) ====================
