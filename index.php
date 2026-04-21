@@ -1176,7 +1176,7 @@ const CV = {
     },
 
     // ==================== UPLOAD MANAGER ====================
-    _uq: { paused: false, cancelled: false, running: false, xhr: null, expanded: true,
+    _uq: { paused: false, cancelled: false, running: false, xhrs: [], expanded: true,
             completed: 0, errors: 0, total: 0, startTime: 0, bytesTotal: 0, bytesDone: 0 },
 
     toggleUploadExpand() {
@@ -1216,7 +1216,8 @@ const CV = {
         const ok = await CV.confirm('Cancelar upload', 'Deseja cancelar todos os uploads pendentes?', 'Cancelar', true);
         if (!ok) return;
         this._uq.cancelled = true;
-        if (this._uq.xhr) { try { this._uq.xhr.abort(); } catch(e){} }
+        this._uq.xhrs.forEach(x => { try { x.abort(); } catch(e){} });
+        this._uq.xhrs = [];
     },
 
     _uqUpdateHeader() {
@@ -1265,75 +1266,130 @@ const CV = {
         const fileList = document.getElementById('uqFileList');
         fileList.innerHTML = '';
 
-        const BATCH = 100;
         const CHUNK_SIZE = 50 * 1024 * 1024;
 
-        // ── Step 1: Create folders ──
+        // ── Step 1: Create folders (6 parallel) ──
         if (folderPaths && folderPaths.length) {
             const paths = [...new Set(folderPaths)].sort();
-            document.getElementById('uqHeaderTitle').textContent = 'Criando ' + paths.length + ' pasta(s)...';
-            document.getElementById('uqHeaderPct').textContent = '';
-            for (let i = 0; i < paths.length; i++) {
-                if (u.cancelled) break;
-                await this._waitWhilePaused();
-                await this.api('create_folder_path', { path: paths[i], folder_id: this.state.currentFolder || '' });
-                const bar = document.getElementById('uqHeaderBar');
-                if (bar) bar.style.width = Math.round(((i+1)/paths.length)*100) + '%';
-            }
+            const totalFolders = paths.length;
+            document.getElementById('uqHeaderTitle').textContent = '0 / ' + totalFolders + ' pasta(s)';
+            document.getElementById('uqHeaderPct').textContent = '0%';
+            const fList = document.getElementById('uqFileList');
+            let fIdx = 0, fDone = 0;
+
+            const folderWorker = async () => {
+                while (fIdx < paths.length && !u.cancelled) {
+                    await this._waitWhilePaused();
+                    if (u.cancelled) break;
+                    const i = fIdx++;
+                    const folderPath = paths[i];
+                    const folderName = folderPath.split('/').pop();
+                    const fItemId = 'uqd_' + i;
+
+                    fList.insertAdjacentHTML('afterbegin',
+                        '<div class="uq-file-item" id="' + fItemId + '">' +
+                        '<i class="bi bi-folder-fill" style="font-size:16px;color:var(--warning)"></i>' +
+                        '<div class="uq-info"><div class="uq-name">' + this.esc(folderName) + '</div>' +
+                        '<div class="uq-detail">' + this.esc(folderPath) + '</div></div>' +
+                        '<span class="uq-pct" style="color:var(--warning)"><i class="bi bi-arrow-repeat spin" style="font-size:12px"></i></span></div>');
+                    while (fList.children.length > 30) fList.removeChild(fList.lastChild);
+
+                    await this.api('create_folder_path', { path: folderPath, folder_id: this.state.currentFolder || '' });
+
+                    const pEl = document.getElementById(fItemId);
+                    if (pEl) { pEl.classList.add('complete'); pEl.querySelector('.uq-pct').innerHTML = '<i class="bi bi-check" style="color:var(--success)"></i>'; }
+
+                    fDone++;
+                    const pct = Math.round((fDone / totalFolders) * 100);
+                    const bar = document.getElementById('uqHeaderBar');
+                    const title = document.getElementById('uqHeaderTitle');
+                    const pctH = document.getElementById('uqHeaderPct');
+                    if (bar) bar.style.width = pct + '%';
+                    if (title) title.textContent = fDone + ' / ' + totalFolders + ' pasta(s)';
+                    if (pctH) pctH.textContent = pct + '%';
+                }
+            };
+            const fWorkers = [];
+            for (let w = 0; w < Math.min(6, paths.length); w++) fWorkers.push(folderWorker());
+            await Promise.all(fWorkers);
+
             this.refresh();
             if (u.cancelled) { this._uqFinish('Cancelado'); return; }
+            document.getElementById('uqFileList').innerHTML = '';
+            document.getElementById('uqHeaderBar').style.width = '0%';
         }
 
-        // ── Step 2: Upload files ──
+        // ── Step 2: Upload files (6 parallel workers for max speed) ──
         if (!files.length) { this._uqFinish('Conclu\u00eddo'); return; }
 
         u.total = files.length;
         for (const f of files) u.bytesTotal += f.size || 0;
         this._uqUpdateHeader();
 
-        for (let i = 0; i < files.length; i++) {
-            if (u.cancelled) break;
-            await this._waitWhilePaused();
-            if (u.cancelled) break;
+        const WORKERS = 6; // match browser connection limit per host
+        const fileList = document.getElementById('uqFileList');
+        let nextIdx = 0;
 
-            const file = files[i];
+        // Render first batch of items
+        const renderItem = (idx) => {
+            const file = files[idx];
             const rp = file.webkitRelativePath || '';
             const name = rp || file.name;
-            const itemId = 'uqf_' + i;
-
-            // Add to visible list (keep max 30 items)
+            const itemId = 'uqf_' + idx;
             fileList.insertAdjacentHTML('afterbegin',
                 '<div class="uq-file-item" id="' + itemId + '">' +
                 '<i class="bi bi-file-earmark" style="font-size:16px;color:var(--text-muted)"></i>' +
                 '<div class="uq-info"><div class="uq-name">' + this.esc(name) + '</div>' +
-                '<div class="upload-progress"><div class="upload-progress-bar" id="' + itemId + '_bar" style="width:0%"></div></div>' +
+                '<div class="upload-progress"><div class="upload-progress-bar" id="' + itemId + '_bar"></div></div>' +
                 '<div class="uq-detail" id="' + itemId + '_detail">' + this.formatSize(file.size) + '</div></div>' +
                 '<span class="uq-pct" id="' + itemId + '_pct">0%</span></div>');
             while (fileList.children.length > 30) fileList.removeChild(fileList.lastChild);
+        };
 
-            try {
-                if (file.size > CHUNK_SIZE) {
-                    await this._uploadChunked(file, itemId, CHUNK_SIZE);
-                } else {
-                    await this._uploadNormal(file, itemId);
+        // Worker function — each worker grabs next file from queue
+        const worker = async (workerId) => {
+            while (nextIdx < files.length && !u.cancelled) {
+                await this._waitWhilePaused();
+                if (u.cancelled) break;
+
+                const idx = nextIdx++;
+                const file = files[idx];
+                const itemId = 'uqf_' + idx;
+
+                renderItem(idx);
+
+                try {
+                    if (file.size > CHUNK_SIZE) {
+                        await this._uploadChunked(file, itemId, CHUNK_SIZE);
+                    } else {
+                        await this._uploadNormal(file, itemId);
+                    }
+                    u.completed++;
+                    u.bytesDone += file.size || 0;
+                    const el = document.getElementById(itemId);
+                    if (el) el.classList.add('complete');
+                    const p = document.getElementById(itemId + '_pct');
+                    if (p) p.textContent = '\u2714';
+                } catch (e) {
+                    u.errors++;
+                    const el = document.getElementById(itemId);
+                    if (el) el.classList.add('error');
+                    const p = document.getElementById(itemId + '_pct');
+                    if (p) p.textContent = '\u2718';
                 }
-                u.completed++;
-                u.bytesDone += file.size || 0;
-                const el = document.getElementById(itemId);
-                if (el) { el.classList.add('complete'); }
-                const pctEl = document.getElementById(itemId + '_pct');
-                if (pctEl) pctEl.textContent = '\u2714';
-            } catch (e) {
-                u.errors++;
-                const el = document.getElementById(itemId);
-                if (el) el.classList.add('error');
-                const pctEl = document.getElementById(itemId + '_pct');
-                if (pctEl) pctEl.textContent = '\u2718';
-            }
 
-            this._uqUpdateHeader();
-            if (i > 0 && i % BATCH === 0) this.refresh();
+                this._uqUpdateHeader();
+                // Refresh file list every 50 files
+                if (u.completed % 50 === 0) this.refresh();
+            }
+        };
+
+        // Launch workers in parallel
+        const workerPromises = [];
+        for (let w = 0; w < Math.min(WORKERS, files.length); w++) {
+            workerPromises.push(worker(w));
         }
+        await Promise.all(workerPromises);
 
         this.refresh();
         this._uqFinish(u.cancelled ? 'Cancelado' : 'Conclu\u00eddo');
@@ -1378,7 +1434,7 @@ const CV = {
 
         const self = this;
         const xhr = new XMLHttpRequest();
-        this._uq.xhr = xhr;
+        this._uq.xhrs.push(xhr);
 
         await new Promise((resolve, reject) => {
             xhr.upload.addEventListener('progress', (e) => {
@@ -1408,7 +1464,7 @@ const CV = {
             xhr.setRequestHeader('X-CSRF-TOKEN', this.state.csrfToken);
             xhr.send(fd);
         });
-        this._uq.xhr = null;
+        this._uq.xhrs = this._uq.xhrs.filter(x => x !== xhr);
     },
 
     // Chunked upload with pause/cancel
@@ -1434,7 +1490,7 @@ const CV = {
 
             const self = this;
             const xhr = new XMLHttpRequest();
-            this._uq.xhr = xhr;
+            this._uq.xhrs.push(xhr);
 
             await new Promise((resolve, reject) => {
                 xhr.upload.addEventListener('progress', (e) => {
@@ -1460,7 +1516,7 @@ const CV = {
                 xhr.setRequestHeader('X-CSRF-TOKEN', self.state.csrfToken);
                 xhr.send(fd);
             });
-            this._uq.xhr = null;
+            this._uq.xhrs = this._uq.xhrs.filter(x => x !== xhr);
         }
 
         // Merge
