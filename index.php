@@ -191,13 +191,36 @@ $permissions = Auth::permissions();
 
 <!-- Upload Panel -->
 <div class="upload-panel" id="uploadPanel">
-    <div class="upload-panel-header">
-        <h4><i class="bi bi-cloud-arrow-up"></i> Uploads</h4>
-        <button class="btn btn-ghost btn-icon" onclick="CV.toggleUploadPanel()" style="width:24px;height:24px">
-            <i class="bi bi-x"></i>
-        </button>
+    <div class="upload-panel-header" onclick="CV.toggleUploadExpand()">
+        <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
+            <i class="bi bi-cloud-arrow-up" id="uqIcon" style="font-size:18px;color:var(--accent)"></i>
+            <div style="flex:1;min-width:0">
+                <div id="uqHeaderTitle" style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Uploads</div>
+                <div class="upload-progress" style="margin-top:4px"><div class="upload-progress-bar" id="uqHeaderBar" style="width:0%"></div></div>
+            </div>
+            <span id="uqHeaderPct" style="font-size:12px;font-weight:600;color:var(--accent);min-width:36px;text-align:right"></span>
+        </div>
+        <div style="display:flex;gap:2px;align-items:center;margin-left:8px" onclick="event.stopPropagation()">
+            <button class="btn btn-ghost btn-icon" id="uqPauseBtn" onclick="CV.toggleUploadPause()" title="Pausar" style="width:28px;height:28px;display:none">
+                <i class="bi bi-pause-fill"></i>
+            </button>
+            <button class="btn btn-ghost btn-icon" id="uqCancelBtn" onclick="CV.cancelUpload()" title="Cancelar" style="width:28px;height:28px;display:none">
+                <i class="bi bi-x-lg" style="color:var(--danger)"></i>
+            </button>
+            <button class="btn btn-ghost btn-icon" onclick="CV.toggleUploadExpand()" id="uqExpandBtn" style="width:28px;height:28px">
+                <i class="bi bi-chevron-up"></i>
+            </button>
+            <button class="btn btn-ghost btn-icon" onclick="CV.closeUploadPanel()" style="width:28px;height:28px">
+                <i class="bi bi-x"></i>
+            </button>
+        </div>
     </div>
-    <div class="upload-panel-body" id="uploadPanelBody"></div>
+    <div class="upload-panel-body" id="uploadPanelBody" style="display:none">
+        <div id="uqStats" style="display:none;padding:10px 14px;font-size:11px;color:var(--text-muted);border-bottom:1px solid var(--border);display:flex;gap:16px">
+            <span id="uqStatsText"></span>
+        </div>
+        <div id="uqFileList"></div>
+    </div>
 </div>
 
 <!-- Hidden file input -->
@@ -1152,140 +1175,200 @@ const CV = {
         document.getElementById('folderInput').value = '';
     },
 
-    // ==================== UPLOAD QUEUE (batch processing) ====================
-    _uploadQueue: [],
-    _uploadRunning: false,
+    // ==================== UPLOAD MANAGER ====================
+    _uq: { paused: false, cancelled: false, running: false, xhr: null, expanded: true,
+            completed: 0, errors: 0, total: 0, startTime: 0, bytesTotal: 0, bytesDone: 0 },
+
+    toggleUploadExpand() {
+        this._uq.expanded = !this._uq.expanded;
+        document.getElementById('uploadPanelBody').style.display = this._uq.expanded ? '' : 'none';
+        const icon = document.querySelector('#uqExpandBtn i');
+        if (icon) icon.className = 'bi bi-chevron-' + (this._uq.expanded ? 'down' : 'up');
+    },
+
+    closeUploadPanel() {
+        if (this._uq.running) {
+            Swal.fire({ title:'Upload em andamento', text:'Cancele o upload antes de fechar.', icon:'warning',
+                confirmButtonText:'OK', background:'var(--bg-modal)', color:'var(--text-primary)',
+                customClass:{popup:'swal-custom-popup'} });
+            return;
+        }
+        document.getElementById('uploadPanel').classList.remove('show');
+    },
+
+    toggleUploadPause() {
+        this._uq.paused = !this._uq.paused;
+        const btn = document.getElementById('uqPauseBtn');
+        const panel = document.getElementById('uploadPanel');
+        if (this._uq.paused) {
+            if (btn) btn.innerHTML = '<i class="bi bi-play-fill" style="color:var(--success)"></i>';
+            if (btn) btn.title = 'Retomar';
+            panel.classList.add('uq-paused');
+            document.getElementById('uqHeaderTitle').textContent = 'Pausado';
+        } else {
+            if (btn) btn.innerHTML = '<i class="bi bi-pause-fill"></i>';
+            if (btn) btn.title = 'Pausar';
+            panel.classList.remove('uq-paused');
+        }
+    },
+
+    async cancelUpload() {
+        const ok = await CV.confirm('Cancelar upload', 'Deseja cancelar todos os uploads pendentes?', 'Cancelar', true);
+        if (!ok) return;
+        this._uq.cancelled = true;
+        if (this._uq.xhr) { try { this._uq.xhr.abort(); } catch(e){} }
+    },
+
+    _uqUpdateHeader() {
+        const u = this._uq;
+        const pct = u.total ? Math.round((u.completed / u.total) * 100) : 0;
+        const bar = document.getElementById('uqHeaderBar');
+        const pctEl = document.getElementById('uqHeaderPct');
+        const title = document.getElementById('uqHeaderTitle');
+        if (bar) bar.style.width = pct + '%';
+        if (pctEl) pctEl.textContent = pct + '%';
+        // Speed
+        const elapsed = (Date.now() - u.startTime) / 1000;
+        let speed = '';
+        if (elapsed > 2 && u.bytesDone > 0) {
+            const bps = u.bytesDone / elapsed;
+            speed = ' \u2014 ' + this.formatSize(Math.round(bps)) + '/s';
+        }
+        if (title && !u.paused) title.textContent = u.completed.toLocaleString() + ' / ' + u.total.toLocaleString() + speed;
+        // Stats
+        const stats = document.getElementById('uqStatsText');
+        if (stats) stats.textContent = u.completed + ' enviado(s), ' + u.errors + ' erro(s), ' + (u.total - u.completed - u.errors) + ' pendente(s)';
+    },
+
+    async _waitWhilePaused() {
+        while (this._uq.paused && !this._uq.cancelled) {
+            await new Promise(r => setTimeout(r, 500));
+        }
+    },
 
     async _startUploadQueue(files, folderPaths) {
         const panel = document.getElementById('uploadPanel');
-        const body = document.getElementById('uploadPanelBody');
         panel.classList.add('show');
-        const BATCH_SIZE = 100;
+        const u = this._uq;
+        u.paused = false; u.cancelled = false; u.running = true;
+        u.completed = 0; u.errors = 0; u.startTime = Date.now();
+        u.bytesTotal = 0; u.bytesDone = 0;
+
+        // Show controls
+        document.getElementById('uqPauseBtn').style.display = '';
+        document.getElementById('uqCancelBtn').style.display = '';
+        document.getElementById('uqStats').style.display = 'flex';
+        document.getElementById('uploadPanelBody').style.display = '';
+        document.getElementById('uqIcon').className = 'bi bi-cloud-arrow-up';
+        document.getElementById('uqIcon').style.color = 'var(--accent)';
+        panel.classList.remove('uq-paused');
+        const fileList = document.getElementById('uqFileList');
+        fileList.innerHTML = '';
+
+        const BATCH = 100;
         const CHUNK_SIZE = 50 * 1024 * 1024;
 
-        // ── Step 1: Create folders in batches ──
+        // ── Step 1: Create folders ──
         if (folderPaths && folderPaths.length) {
-            const uniquePaths = [...new Set(folderPaths)].sort();
-            const foldersId = 'uq_folders_' + Date.now();
-            body.innerHTML = `
-                <div class="upload-item" id="${foldersId}">
-                    <i class="bi bi-folder-plus" style="font-size:20px;color:var(--warning)"></i>
-                    <div class="upload-info">
-                        <div class="upload-name" style="font-weight:600">Criando ${uniquePaths.length} pasta(s)...</div>
-                        <div class="upload-progress"><div class="upload-progress-bar" style="width:0%"></div></div>
-                        <div class="upload-status">0 / ${uniquePaths.length}</div>
-                    </div>
-                </div>`;
-            for (let i = 0; i < uniquePaths.length; i++) {
-                await this.api('create_folder_path', { path: uniquePaths[i], folder_id: this.state.currentFolder || '' });
-                const el = document.getElementById(foldersId);
-                if (el && (i % 10 === 0 || i === uniquePaths.length - 1)) {
-                    const pct = Math.round(((i + 1) / uniquePaths.length) * 100);
-                    el.querySelector('.upload-progress-bar').style.width = pct + '%';
-                    el.querySelector('.upload-status').textContent = (i + 1) + ' / ' + uniquePaths.length;
-                }
+            const paths = [...new Set(folderPaths)].sort();
+            document.getElementById('uqHeaderTitle').textContent = 'Criando ' + paths.length + ' pasta(s)...';
+            document.getElementById('uqHeaderPct').textContent = '';
+            for (let i = 0; i < paths.length; i++) {
+                if (u.cancelled) break;
+                await this._waitWhilePaused();
+                await this.api('create_folder_path', { path: paths[i], folder_id: this.state.currentFolder || '' });
+                const bar = document.getElementById('uqHeaderBar');
+                if (bar) bar.style.width = Math.round(((i+1)/paths.length)*100) + '%';
             }
             this.refresh();
+            if (u.cancelled) { this._uqFinish('Cancelado'); return; }
         }
 
-        // ── Step 2: Upload files in batches ──
-        if (!files.length) { this.refresh(); return; }
+        // ── Step 2: Upload files ──
+        if (!files.length) { this._uqFinish('Conclu\u00eddo'); return; }
 
-        const totalFiles = files.length;
-        const totalBatches = Math.ceil(totalFiles / BATCH_SIZE);
-        let completed = 0, errors = 0;
+        u.total = files.length;
+        for (const f of files) u.bytesTotal += f.size || 0;
+        this._uqUpdateHeader();
 
-        // Show main progress header
-        body.innerHTML = `
-            <div class="upload-item" id="uq_header" style="background:var(--bg-tertiary);border-bottom:2px solid var(--accent)">
-                <i class="bi bi-cloud-arrow-up" style="font-size:22px;color:var(--accent)"></i>
-                <div class="upload-info">
-                    <div class="upload-name" style="font-weight:600" id="uq_title">${totalFiles.toLocaleString()} arquivo(s) — Lote 1 de ${totalBatches}</div>
-                    <div class="upload-progress"><div class="upload-progress-bar" id="uq_bar" style="width:0%"></div></div>
-                    <div class="upload-status" id="uq_status">Iniciando...</div>
-                </div>
-            </div>
-            <div id="uq_batch_items"></div>`;
+        for (let i = 0; i < files.length; i++) {
+            if (u.cancelled) break;
+            await this._waitWhilePaused();
+            if (u.cancelled) break;
 
-        // Process each batch
-        for (let b = 0; b < totalBatches; b++) {
-            const batchStart = b * BATCH_SIZE;
-            const batchEnd = Math.min(batchStart + BATCH_SIZE, totalFiles);
-            const batchFiles = files.slice(batchStart, batchEnd);
-            const batchNum = b + 1;
+            const file = files[i];
+            const rp = file.webkitRelativePath || '';
+            const name = rp || file.name;
+            const itemId = 'uqf_' + i;
 
-            // Update header
-            const uqTitle = document.getElementById('uq_title');
-            if (uqTitle) uqTitle.textContent = totalFiles.toLocaleString() + ' arquivo(s) \u2014 Lote ' + batchNum + ' de ' + totalBatches;
+            // Add to visible list (keep max 30 items)
+            fileList.insertAdjacentHTML('afterbegin',
+                '<div class="uq-file-item" id="' + itemId + '">' +
+                '<i class="bi bi-file-earmark" style="font-size:16px;color:var(--text-muted)"></i>' +
+                '<div class="uq-info"><div class="uq-name">' + this.esc(name) + '</div>' +
+                '<div class="upload-progress"><div class="upload-progress-bar" id="' + itemId + '_bar" style="width:0%"></div></div>' +
+                '<div class="uq-detail" id="' + itemId + '_detail">' + this.formatSize(file.size) + '</div></div>' +
+                '<span class="uq-pct" id="' + itemId + '_pct">0%</span></div>');
+            while (fileList.children.length > 30) fileList.removeChild(fileList.lastChild);
 
-            // Clear previous batch items from DOM
-            const batchContainer = document.getElementById('uq_batch_items');
-            if (batchContainer) batchContainer.innerHTML = '';
-
-            // Process each file in the batch sequentially
-            for (let i = 0; i < batchFiles.length; i++) {
-                const file = batchFiles[i];
-                const relativePath = file.webkitRelativePath || '';
-                const displayName = relativePath || file.name;
-                const itemId = 'uq_f_' + Date.now() + '_' + i;
-                const globalIdx = batchStart + i + 1;
-
-                // Update header progress
-                const uqBar = document.getElementById('uq_bar');
-                const uqStatus = document.getElementById('uq_status');
-                if (uqBar) uqBar.style.width = Math.round((completed / totalFiles) * 100) + '%';
-                if (uqStatus) uqStatus.textContent = completed.toLocaleString() + ' / ' + totalFiles.toLocaleString() + ' \u2014 ' + file.name.substring(0, 50);
-
-                // Add item to batch container (prepend)
-                if (batchContainer) {
-                    batchContainer.insertAdjacentHTML('afterbegin', `
-                        <div class="upload-item" id="${itemId}">
-                            <i class="bi bi-file-earmark" style="font-size:18px;color:var(--text-muted)"></i>
-                            <div class="upload-info">
-                                <div class="upload-name" style="font-size:11px;opacity:0.8">${this.esc(displayName).substring(0, 60)}</div>
-                                <div class="upload-progress"><div class="upload-progress-bar" style="width:0%"></div></div>
-                                <div class="upload-status" style="font-size:10px">Enviando...</div>
-                            </div>
-                        </div>`);
-                    // Keep max 20 visible items to prevent DOM bloat
-                    while (batchContainer.children.length > 20) {
-                        batchContainer.removeChild(batchContainer.lastChild);
-                    }
+            try {
+                if (file.size > CHUNK_SIZE) {
+                    await this._uploadChunked(file, itemId, CHUNK_SIZE);
+                } else {
+                    await this._uploadNormal(file, itemId);
                 }
-
-                try {
-                    if (file.size > CHUNK_SIZE) {
-                        await this._uploadChunked(file, itemId, CHUNK_SIZE);
-                    } else {
-                        await this._uploadNormal(file, itemId);
-                    }
-                    completed++;
-                } catch (e) {
-                    errors++;
-                    const el = document.getElementById(itemId);
-                    if (el) { el.classList.add('error'); el.querySelector('.upload-status').textContent = 'Erro'; }
-                }
+                u.completed++;
+                u.bytesDone += file.size || 0;
+                const el = document.getElementById(itemId);
+                if (el) { el.classList.add('complete'); }
+                const pctEl = document.getElementById(itemId + '_pct');
+                if (pctEl) pctEl.textContent = '\u2714';
+            } catch (e) {
+                u.errors++;
+                const el = document.getElementById(itemId);
+                if (el) el.classList.add('error');
+                const pctEl = document.getElementById(itemId + '_pct');
+                if (pctEl) pctEl.textContent = '\u2718';
             }
 
-            // Refresh file list after each batch
-            this.refresh();
+            this._uqUpdateHeader();
+            if (i > 0 && i % BATCH === 0) this.refresh();
         }
 
-        // Final status
-        const uqBar = document.getElementById('uq_bar');
-        const uqStatus = document.getElementById('uq_status');
-        const uqTitle = document.getElementById('uq_title');
-        const uqHeader = document.getElementById('uq_header');
-        if (uqBar) uqBar.style.width = '100%';
-        if (uqTitle) uqTitle.textContent = completed.toLocaleString() + ' arquivo(s) enviado(s)';
-        if (uqStatus) uqStatus.textContent = 'Conclu\u00eddo' + (errors ? ' \u2014 ' + errors + ' erro(s)' : '');
-        if (uqHeader) uqHeader.classList.add('complete');
-        const bc = document.getElementById('uq_batch_items');
-        if (bc) bc.innerHTML = '';
+        this.refresh();
+        this._uqFinish(u.cancelled ? 'Cancelado' : 'Conclu\u00eddo');
     },
 
-    // Normal upload (single request)
+    _uqFinish(status) {
+        const u = this._uq;
+        u.running = false;
+        document.getElementById('uqPauseBtn').style.display = 'none';
+        document.getElementById('uqCancelBtn').style.display = 'none';
+        const bar = document.getElementById('uqHeaderBar');
+        const pctEl = document.getElementById('uqHeaderPct');
+        const title = document.getElementById('uqHeaderTitle');
+        const icon = document.getElementById('uqIcon');
+        if (bar) bar.style.width = '100%';
+        if (u.cancelled) {
+            if (bar) bar.style.background = 'var(--warning)';
+            if (icon) { icon.className = 'bi bi-exclamation-circle'; icon.style.color = 'var(--warning)'; }
+            if (pctEl) pctEl.textContent = '';
+            if (title) title.textContent = 'Upload cancelado';
+        } else {
+            if (bar) bar.style.background = 'var(--success)';
+            if (icon) { icon.className = 'bi bi-check-circle-fill'; icon.style.color = 'var(--success)'; }
+            if (pctEl) pctEl.textContent = '100%';
+            if (title) title.textContent = u.completed.toLocaleString() + ' arquivo(s) enviado(s)' + (u.errors ? ' \u2014 ' + u.errors + ' erro(s)' : '');
+        }
+        const stats = document.getElementById('uqStatsText');
+        const elapsed = Math.round((Date.now() - u.startTime) / 1000);
+        const min = Math.floor(elapsed / 60), sec = elapsed % 60;
+        if (stats) stats.textContent = 'Tempo: ' + (min ? min + 'min ' : '') + sec + 's \u2014 ' + this.formatSize(u.bytesDone) + ' transferido(s)';
+    },
+
+    // Normal upload (single request) with pause/cancel
     async _uploadNormal(file, itemId) {
+        if (this._uq.cancelled) throw new Error('Cancelado');
         const fd = new FormData();
         fd.append('action', 'upload');
         fd.append('file', file);
@@ -1293,53 +1376,55 @@ const CV = {
         fd.append('conflict', 'rename');
         if (file.webkitRelativePath) fd.append('relative_path', file.webkitRelativePath);
 
+        const self = this;
         const xhr = new XMLHttpRequest();
-        await new Promise((resolve) => {
+        this._uq.xhr = xhr;
+
+        await new Promise((resolve, reject) => {
             xhr.upload.addEventListener('progress', (e) => {
                 if (e.lengthComputable) {
                     const pct = Math.round(e.loaded / e.total * 100);
-                    const el = document.getElementById(itemId);
-                    if (el) {
-                        el.querySelector('.upload-progress-bar').style.width = pct + '%';
-                        el.querySelector('.upload-status').textContent = pct + '%';
-                    }
+                    const bar = document.getElementById(itemId + '_bar');
+                    const pctEl = document.getElementById(itemId + '_pct');
+                    const detail = document.getElementById(itemId + '_detail');
+                    if (bar) bar.style.width = pct + '%';
+                    if (pctEl) pctEl.textContent = pct + '%';
+                    if (detail) detail.textContent = self.formatSize(e.loaded) + ' / ' + self.formatSize(e.total);
                 }
             });
             xhr.addEventListener('load', () => {
-                const el = document.getElementById(itemId);
                 try {
                     const res = JSON.parse(xhr.responseText);
-                    if (el) {
-                        el.classList.add(res.success ? 'complete' : 'error');
-                        el.querySelector('.upload-status').textContent = res.results?.[0]?.message || (res.success ? 'Concluído' : 'Erro');
-                        el.querySelector('.upload-progress-bar').style.width = '100%';
+                    if (!res.success) {
+                        const detail = document.getElementById(itemId + '_detail');
+                        if (detail) detail.textContent = res.results?.[0]?.message || 'Erro';
                     }
                 } catch(e) {}
                 resolve();
             });
-            xhr.addEventListener('error', () => {
-                const el = document.getElementById(itemId);
-                if (el) { el.classList.add('error'); el.querySelector('.upload-status').textContent = 'Erro de rede'; }
-                resolve();
-            });
+            xhr.addEventListener('error', () => reject(new Error('Rede')));
+            xhr.addEventListener('abort', () => reject(new Error('Cancelado')));
             xhr.open('POST', 'api/index.php');
             xhr.setRequestHeader('X-CSRF-TOKEN', this.state.csrfToken);
             xhr.send(fd);
         });
+        this._uq.xhr = null;
     },
 
-    // Chunked upload (multiple requests for large files)
+    // Chunked upload with pause/cancel
     async _uploadChunked(file, itemId, chunkSize) {
+        if (this._uq.cancelled) throw new Error('Cancelado');
         const totalChunks = Math.ceil(file.size / chunkSize);
         const uploadId = Date.now().toString(36) + '-' + Math.random().toString(36).substr(2, 8);
-        const el = document.getElementById(itemId);
 
-        // Upload each chunk
         for (let c = 0; c < totalChunks; c++) {
+            if (this._uq.cancelled) throw new Error('Cancelado');
+            await this._waitWhilePaused();
+            if (this._uq.cancelled) throw new Error('Cancelado');
+
             const start = c * chunkSize;
             const end = Math.min(start + chunkSize, file.size);
             const chunk = file.slice(start, end);
-
             const fd = new FormData();
             fd.append('action', 'upload_chunk');
             fd.append('chunk', chunk, 'chunk');
@@ -1347,51 +1432,50 @@ const CV = {
             fd.append('chunk_index', c);
             fd.append('total_chunks', totalChunks);
 
+            const self = this;
+            const xhr = new XMLHttpRequest();
+            this._uq.xhr = xhr;
+
             await new Promise((resolve, reject) => {
-                const xhr = new XMLHttpRequest();
                 xhr.upload.addEventListener('progress', (e) => {
-                    if (e.lengthComputable && el) {
-                        const chunkProgress = e.loaded / e.total;
-                        const totalProgress = ((c + chunkProgress) / totalChunks) * 100;
-                        el.querySelector('.upload-progress-bar').style.width = totalProgress.toFixed(1) + '%';
-                        el.querySelector('.upload-status').textContent = Math.round(totalProgress) + '% (' + (c+1) + '/' + totalChunks + ')';
+                    if (e.lengthComputable) {
+                        const chunkPct = e.loaded / e.total;
+                        const totalPct = Math.round(((c + chunkPct) / totalChunks) * 100);
+                        const bar = document.getElementById(itemId + '_bar');
+                        const pctEl = document.getElementById(itemId + '_pct');
+                        const detail = document.getElementById(itemId + '_detail');
+                        if (bar) bar.style.width = totalPct + '%';
+                        if (pctEl) pctEl.textContent = totalPct + '%';
+                        const done = start + e.loaded;
+                        if (detail) detail.textContent = self.formatSize(done) + ' / ' + self.formatSize(file.size) + ' (chunk ' + (c+1) + '/' + totalChunks + ')';
                     }
                 });
                 xhr.addEventListener('load', () => {
-                    try {
-                        const res = JSON.parse(xhr.responseText);
-                        if (!res.success) { reject(new Error(res.message)); return; }
-                    } catch(e) {}
+                    try { const res = JSON.parse(xhr.responseText); if (!res.success) { reject(new Error(res.message)); return; } } catch(e){}
                     resolve();
                 });
-                xhr.addEventListener('error', () => reject(new Error('Conexão perdida no chunk ' + (c+1))));
+                xhr.addEventListener('error', () => reject(new Error('Rede')));
+                xhr.addEventListener('abort', () => reject(new Error('Cancelado')));
                 xhr.open('POST', 'api/index.php');
-                xhr.setRequestHeader('X-CSRF-TOKEN', this.state.csrfToken);
+                xhr.setRequestHeader('X-CSRF-TOKEN', self.state.csrfToken);
                 xhr.send(fd);
             });
+            this._uq.xhr = null;
         }
 
-        // Merge all chunks
-        if (el) el.querySelector('.upload-status').textContent = 'Finalizando...';
-
+        // Merge
+        const detail = document.getElementById(itemId + '_detail');
+        if (detail) detail.textContent = 'Finalizando...';
         const mergeResult = await this.api('upload_merge', {
-            upload_id: uploadId,
-            file_name: file.name,
-            total_chunks: totalChunks,
-            folder_id: this.state.currentFolder || '',
-            conflict: 'rename',
+            upload_id: uploadId, file_name: file.name, total_chunks: totalChunks,
+            folder_id: this.state.currentFolder || '', conflict: 'rename',
             relative_path: file.webkitRelativePath || ''
         });
-
-        if (el) {
-            el.classList.add(mergeResult.success ? 'complete' : 'error');
-            el.querySelector('.upload-status').textContent = mergeResult.message || (mergeResult.success ? 'Concluído' : 'Erro');
-            el.querySelector('.upload-progress-bar').style.width = '100%';
+        if (!mergeResult.success) {
+            if (detail) detail.textContent = mergeResult.message || 'Erro no merge';
+            throw new Error(mergeResult.message);
         }
-    },
-
-    toggleUploadPanel() {
-        document.getElementById('uploadPanel').classList.toggle('show');
+        if (detail) detail.textContent = this.formatSize(file.size) + ' \u2014 Conclu\u00eddo';
     },
 
     // Drag & Drop upload (files + folders)
