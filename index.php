@@ -384,19 +384,93 @@ const CV = {
     },
 
     async _poll() {
+        // Skip polling if user is interacting
+        if (document.getElementById('modalOverlay')?.classList.contains('show')) return;
+        if (document.getElementById('contextMenu')?.classList.contains('show')) return;
+        if (document.querySelector('.swal2-container')) return;
+        if (this.state.currentNav !== 'files') return;
+
         try {
             const d = await this.api('poll_updates', { folder_id: this.state.currentFolder || '' });
             if (!d.success) return;
             this.state._myId = d.my_id;
             this.state._locks = d.locks || [];
-            // Update lock indicators
             this._updateLockIcons();
-            // If hash changed, refresh file list
+
+            // Only do smart refresh if hash actually changed
             if (this.state._pollHash && this.state._pollHash !== d.hash) {
-                this.refresh();
+                await this._smartRefresh();
             }
             this.state._pollHash = d.hash;
         } catch(e) {}
+    },
+
+    // Fetch new data and update DOM without full reload
+    async _smartRefresh() {
+        const data = await this.api('list', {
+            folder_id: this.state.currentFolder || '',
+            sort: this.state.sort,
+            order: this.state.order
+        });
+        if (!data.success) return;
+
+        const oldFolders = this.state.items.folders || [];
+        const oldFiles = this.state.items.files || [];
+        const newFolders = data.folders || [];
+        const newFiles = data.files || [];
+
+        // Build lookup maps
+        const oldMap = {};
+        oldFolders.forEach(f => oldMap['folder_' + f.id] = f);
+        oldFiles.forEach(f => oldMap['file_' + f.id] = f);
+        const newMap = {};
+        newFolders.forEach(f => newMap['folder_' + f.id] = f);
+        newFiles.forEach(f => newMap['file_' + f.id] = f);
+
+        // Detect changes
+        const added = [];
+        const removed = [];
+        let changed = false;
+
+        // Check for new or modified items
+        for (const key in newMap) {
+            if (!oldMap[key]) { added.push(key); changed = true; }
+            else {
+                const o = oldMap[key], n = newMap[key];
+                if (o.updated_at !== n.updated_at || o.original_name !== n.original_name || 
+                    o.name !== n.name || o.size !== n.size) {
+                    changed = true;
+                }
+            }
+        }
+        // Check for removed items
+        for (const key in oldMap) {
+            if (!newMap[key]) { removed.push(key); changed = true; }
+        }
+
+        if (!changed) return;
+
+        // Update state
+        this.state.items = { folders: newFolders, files: newFiles };
+        this.updateStats(data.stats);
+
+        // If only small changes and user has selections, do targeted DOM update
+        if (added.length + removed.length <= 10 && this.state.selectedItems.length === 0) {
+            // Remove deleted items from DOM
+            removed.forEach(key => {
+                const [type, id] = key.split('_');
+                const el = document.querySelector(`.file-item[data-id="${id}"][data-type="${type}"], .file-grid-item[data-id="${id}"][data-type="${type}"]`);
+                if (el) el.remove();
+            });
+            // For added/modified, just re-render everything (simpler and reliable)
+            if (added.length > 0 || (changed && removed.length === 0)) {
+                this.renderFiles(newFolders, newFiles);
+            }
+        } else if (this.state.selectedItems.length === 0) {
+            // Larger change, no selection — safe to re-render
+            this.renderFiles(newFolders, newFiles);
+        }
+        // If user has active selection, skip render to avoid disruption
     },
 
     _updateLockIcons() {
@@ -1254,6 +1328,8 @@ const CV = {
         u.paused = false; u.cancelled = false; u.running = true;
         u.completed = 0; u.errors = 0; u.startTime = Date.now();
         u.bytesTotal = 0; u.bytesDone = 0;
+        // CAPTURE target folder at start — never changes during upload
+        const targetFolder = this.state.currentFolder;
 
         // Show controls
         document.getElementById('uqPauseBtn').style.display = '';
@@ -1294,7 +1370,7 @@ const CV = {
                         '<span class="uq-pct" style="color:var(--warning)"><i class="bi bi-arrow-repeat spin" style="font-size:12px"></i></span></div>');
                     while (fList.children.length > 30) fList.removeChild(fList.lastChild);
 
-                    await this.api('create_folder_path', { path: folderPath, folder_id: this.state.currentFolder || '' });
+                    await this.api('create_folder_path', { path: folderPath, folder_id: targetFolder || '' });
 
                     const pEl = document.getElementById(fItemId);
                     if (pEl) { pEl.classList.add('complete'); pEl.querySelector('.uq-pct').innerHTML = '<i class="bi bi-check" style="color:var(--success)"></i>'; }
@@ -1313,7 +1389,7 @@ const CV = {
             for (let w = 0; w < Math.min(6, paths.length); w++) fWorkers.push(folderWorker());
             await Promise.all(fWorkers);
 
-            this.refresh();
+            this.state._pollHash = ''; // trigger smart refresh on next poll
             if (u.cancelled) { this._uqFinish('Cancelado'); return; }
             document.getElementById('uqFileList').innerHTML = '';
             document.getElementById('uqHeaderBar').style.width = '0%';
@@ -1359,9 +1435,9 @@ const CV = {
 
                 try {
                     if (file.size > CHUNK_SIZE) {
-                        await this._uploadChunked(file, itemId, CHUNK_SIZE);
+                        await this._uploadChunked(file, itemId, CHUNK_SIZE, targetFolder);
                     } else {
-                        await this._uploadNormal(file, itemId);
+                        await this._uploadNormal(file, itemId, targetFolder);
                     }
                     u.completed++;
                     u.bytesDone += file.size || 0;
@@ -1378,8 +1454,8 @@ const CV = {
                 }
 
                 this._uqUpdateHeader();
-                // Refresh file list every 50 files
-                if (u.completed % 50 === 0) this.refresh();
+                // Invalidate poll hash so smart refresh picks up changes
+                if (u.completed % 20 === 0) this.state._pollHash = '';
             }
         };
 
@@ -1390,7 +1466,7 @@ const CV = {
         }
         await Promise.all(workerPromises);
 
-        this.refresh();
+        this.state._pollHash = ''; // force final smart refresh
         this._uqFinish(u.cancelled ? 'Cancelado' : 'Conclu\u00eddo');
     },
 
@@ -1422,12 +1498,12 @@ const CV = {
     },
 
     // Normal upload (single request) with pause/cancel
-    async _uploadNormal(file, itemId) {
+    async _uploadNormal(file, itemId, targetFolder) {
         if (this._uq.cancelled) throw new Error('Cancelado');
         const fd = new FormData();
         fd.append('action', 'upload');
         fd.append('file', file);
-        fd.append('folder_id', this.state.currentFolder || '');
+        fd.append('folder_id', targetFolder || '');
         fd.append('conflict', 'rename');
         if (file.webkitRelativePath) fd.append('relative_path', file.webkitRelativePath);
 
@@ -1467,7 +1543,7 @@ const CV = {
     },
 
     // Chunked upload with pause/cancel
-    async _uploadChunked(file, itemId, chunkSize) {
+    async _uploadChunked(file, itemId, chunkSize, targetFolder) {
         if (this._uq.cancelled) throw new Error('Cancelado');
         const totalChunks = Math.ceil(file.size / chunkSize);
         const uploadId = Date.now().toString(36) + '-' + Math.random().toString(36).substr(2, 8);
@@ -1523,7 +1599,7 @@ const CV = {
         if (detail) detail.textContent = 'Finalizando...';
         const mergeResult = await this.api('upload_merge', {
             upload_id: uploadId, file_name: file.name, total_chunks: totalChunks,
-            folder_id: this.state.currentFolder || '', conflict: 'rename',
+            folder_id: targetFolder || '', conflict: 'rename',
             relative_path: file.webkitRelativePath || ''
         });
         if (!mergeResult.success) {
