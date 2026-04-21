@@ -1327,7 +1327,6 @@ const CV = {
         this._uqUpdateHeader();
 
         const WORKERS = 6; // match browser connection limit per host
-        const fileList = document.getElementById('uqFileList');
         let nextIdx = 0;
 
         // Render first batch of items
