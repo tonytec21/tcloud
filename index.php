@@ -229,18 +229,6 @@ $permissions = Auth::permissions();
 
 <!-- ===== MODAL TEMPLATES ===== -->
 
-<!-- Generic Modal -->
-<div class="modal-overlay" id="modalOverlay">
-    <div class="modal" id="modalContent">
-        <div class="modal-header">
-            <h3 id="modalTitle"></h3>
-            <button class="btn btn-ghost btn-icon" onclick="CV.closeModal()"><i class="bi bi-x-lg"></i></button>
-        </div>
-        <div class="modal-body" id="modalBody"></div>
-        <div class="modal-footer" id="modalFooter"></div>
-    </div>
-</div>
-
 <!-- Editor Modal -->
 <div class="modal-overlay" id="editorOverlay">
     <div class="modal modal-full" style="display:flex;flex-direction:column">
@@ -385,9 +373,8 @@ const CV = {
 
     async _poll() {
         // Skip polling if user is interacting
-        if (document.getElementById('modalOverlay')?.classList.contains('show')) return;
-        if (document.getElementById('contextMenu')?.classList.contains('show')) return;
         if (document.querySelector('.swal2-container')) return;
+        if (document.getElementById('contextMenu')?.classList.contains('show')) return;
         if (this.state.currentNav !== 'files') return;
 
         try {
@@ -514,13 +501,20 @@ const CV = {
             const res = await fetch('api/index.php', opts);
             const json = await res.json();
             if (json.redirect) {
+                // Never redirect during uploads or batch operations
+                if (this._uq && this._uq.running) {
+                    console.warn('Session expired during upload — ignoring redirect');
+                    return { success: false, message: 'Sessão expirada.' };
+                }
                 window.location.href = json.redirect;
                 return json;
             }
             if (json.csrf_token) this.state.csrfToken = json.csrf_token;
             return json;
         } catch (e) {
-            this.toast('Erro de conexão com o servidor.', 'error');
+            if (!(this._uq && this._uq.running)) {
+                this.toast('Erro de conexão com o servidor.', 'error');
+            }
             throw e;
         }
     },
@@ -1097,6 +1091,14 @@ const CV = {
         panel.classList.add('show');
         body.style.display = '';
 
+        // Prevent session redirect during batch operation
+        this._uq.running = true;
+        const keepalive = setInterval(() => {
+            fetch('api/index.php', { method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: 'action=heartbeat' }).catch(() => {});
+        }, 60000);
+
         const total = items.length;
         let completed = 0, errors = 0;
         const barColor = isDanger ? 'var(--danger)' : 'var(--accent)';
@@ -1178,6 +1180,8 @@ const CV = {
             if (el.style.opacity === '0.3') el.remove();
         });
 
+        this._uq.running = false;
+        clearInterval(keepalive);
         this.state._pollHash = '';
     },
 
@@ -1426,6 +1430,15 @@ const CV = {
         u.bytesTotal = 0; u.bytesDone = 0;
         // CAPTURE target folder at start — never changes during upload
         const targetFolder = this.state.currentFolder;
+        // Session keepalive — ping every 60s to prevent session expiry
+        if (u._keepalive) clearInterval(u._keepalive);
+        u._keepalive = setInterval(() => {
+            fetch('api/index.php', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: 'action=heartbeat'
+            }).catch(() => {});
+        }, 60000);
 
         // Show controls
         document.getElementById('uqPauseBtn').style.display = '';
@@ -1569,6 +1582,7 @@ const CV = {
     _uqFinish(status) {
         const u = this._uq;
         u.running = false;
+        if (u._keepalive) { clearInterval(u._keepalive); u._keepalive = null; }
         document.getElementById('uqPauseBtn').style.display = 'none';
         document.getElementById('uqCancelBtn').style.display = 'none';
         const bar = document.getElementById('uqHeaderBar');
@@ -2378,15 +2392,34 @@ const CV = {
         });
     },
 
-    // Modal
+    // Modal (SweetAlert2)
     openModal(title, body, footer = '') {
-        document.getElementById('modalTitle').textContent = title;
-        document.getElementById('modalBody').innerHTML = body;
-        document.getElementById('modalFooter').innerHTML = footer;
-        document.getElementById('modalOverlay').classList.add('show');
+        Swal.fire({
+            title: title,
+            html: '<div style="text-align:left">' + body + '</div>' +
+                  (footer ? '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">' + footer + '</div>' : ''),
+            showConfirmButton: false,
+            showCloseButton: true,
+            width: 500,
+            background: 'var(--bg-modal)',
+            color: 'var(--text-primary)',
+            customClass: { popup: 'swal-custom-popup', htmlContainer: 'swal-modal-body' },
+            didOpen: () => {
+                // Auto-focus first input
+                setTimeout(() => {
+                    const input = Swal.getPopup().querySelector('input:not([type=hidden]),select,textarea');
+                    if (input) input.focus();
+                    // Enter key submits primary button
+                    const primary = Swal.getPopup().querySelector('.btn-primary');
+                    Swal.getPopup().querySelectorAll('input').forEach(inp => {
+                        inp.addEventListener('keydown', (e) => { if (e.key === 'Enter' && primary) primary.click(); });
+                    });
+                }, 100);
+            }
+        });
     },
     closeModal() {
-        document.getElementById('modalOverlay').classList.remove('show');
+        Swal.close();
     },
 
     // Toast
@@ -2545,14 +2578,6 @@ document.addEventListener('DOMContentLoaded', () => {
     if (params.get('google_error')) {
         CV.toast(decodeURIComponent(params.get('google_error')), 'error');
         history.replaceState({}, '', window.location.pathname);
-    }
-});
-
-// Enter nos modais
-document.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && document.getElementById('modalOverlay').classList.contains('show')) {
-        const btn = document.querySelector('#modalFooter .btn-primary');
-        if (btn && document.activeElement?.tagName !== 'TEXTAREA') btn.click();
     }
 });
 </script>

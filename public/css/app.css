@@ -1284,62 +1284,177 @@ select.form-control {
 }
 
 /* ===== SWEETALERT2 DARK THEME ===== */
-[data-theme="dark"] .swal2-popup.swal-custom-popup {
-    background: var(--bg-modal);
+/* ===== SWEETALERT2 THEME ===== */
+/* ===== SWEETALERT2 CUSTOM THEME ===== */
+/* Backdrop */
+.swal2-container { backdrop-filter: blur(4px) !important; }
+.swal2-container.swal2-backdrop-show { background: rgba(0,0,0,0.45) !important; }
+
+/* Popup */
+.swal2-popup.swal-custom-popup {
+    background: var(--bg-modal, var(--bg-card));
     color: var(--text-primary);
     border: 1px solid var(--border);
-    border-radius: var(--radius-lg);
+    border-radius: 16px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.35), 0 0 0 1px rgba(255,255,255,0.05) inset;
+    font-family: var(--font-main);
+    padding: 28px 32px 24px;
+    animation: swalSlideIn 0.25s cubic-bezier(0.34,1.56,0.64,1);
 }
-[data-theme="dark"] .swal2-title {
+@keyframes swalSlideIn {
+    from { opacity:0; transform: scale(0.92) translateY(10px); }
+    to { opacity:1; transform: scale(1) translateY(0); }
+}
+
+/* Title */
+.swal2-popup.swal-custom-popup .swal2-title {
     color: var(--text-primary);
+    font-size: 19px;
+    font-weight: 700;
+    font-family: var(--font-main);
+    padding: 0 0 4px 0;
 }
-[data-theme="dark"] .swal2-html-container {
+
+/* Content */
+.swal2-popup.swal-custom-popup .swal2-html-container {
     color: var(--text-secondary);
+    font-size: 14px;
+    font-family: var(--font-main);
+    line-height: 1.65;
+    margin: 8px 0 0 0;
 }
-[data-theme="dark"] .swal2-input,
-[data-theme="dark"] .swal2-textarea,
-[data-theme="dark"] .swal-custom-input {
-    background: var(--bg-input) !important;
-    border-color: var(--border) !important;
-    color: var(--text-primary) !important;
-    border-radius: var(--radius) !important;
+
+/* Close button */
+.swal2-popup.swal-custom-popup .swal2-close {
+    color: var(--text-muted);
+    font-size: 20px;
+    width: 36px; height: 36px;
+    border-radius: 10px;
+    transition: all 0.15s;
+    top: 12px; right: 12px;
 }
-[data-theme="dark"] .swal2-input:focus,
-[data-theme="dark"] .swal-custom-input:focus {
-    border-color: var(--accent) !important;
-    box-shadow: 0 0 0 3px var(--accent-bg) !important;
+.swal2-popup.swal-custom-popup .swal2-close:hover {
+    color: var(--text-primary);
+    background: var(--bg-active);
 }
+.swal2-popup.swal-custom-popup .swal2-close:focus { box-shadow: none; }
+
+/* Icons */
+.swal2-popup.swal-custom-popup .swal2-icon {
+    margin: 12px auto 8px;
+    border-width: 3px;
+    width: 56px; height: 56px;
+}
+.swal2-popup.swal-custom-popup .swal2-icon .swal2-icon-content { font-size: 32px; }
+.swal2-popup.swal-custom-popup .swal2-icon.swal2-question { border-color: var(--accent) !important; color: var(--accent) !important; }
+.swal2-popup.swal-custom-popup .swal2-icon.swal2-warning { border-color: #f59e0b !important; color: #f59e0b !important; }
+.swal2-popup.swal-custom-popup .swal2-icon.swal2-error { border-color: var(--danger) !important; color: var(--danger) !important; }
+.swal2-popup.swal-custom-popup .swal2-icon.swal2-success { border-color: var(--success) !important; }
+.swal2-popup.swal-custom-popup .swal2-icon.swal2-success .swal2-success-line-long,
+.swal2-popup.swal-custom-popup .swal2-icon.swal2-success .swal2-success-line-tip { background: var(--success) !important; }
+.swal2-popup.swal-custom-popup .swal2-icon.swal2-success .swal2-success-ring { border-color: var(--success) !important; }
+.swal2-popup.swal-custom-popup .swal2-icon.swal2-info { border-color: var(--accent) !important; color: var(--accent) !important; }
+
+/* Buttons */
+.swal2-popup.swal-custom-popup .swal2-actions { margin-top: 20px; gap: 10px; }
 .swal-confirm-btn {
-    border-radius: var(--radius) !important;
+    border-radius: 10px !important;
     font-family: var(--font-main) !important;
-    font-weight: 500 !important;
-    padding: 9px 20px !important;
+    font-weight: 600 !important;
+    padding: 10px 24px !important;
+    font-size: 14px !important;
+    letter-spacing: 0.01em;
+    transition: all 0.15s !important;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.15) !important;
 }
+.swal-confirm-btn:hover { transform: translateY(-1px); box-shadow: 0 4px 14px rgba(0,0,0,0.2) !important; }
 .swal-cancel-btn {
-    border-radius: var(--radius) !important;
+    border-radius: 10px !important;
     font-family: var(--font-main) !important;
     font-weight: 500 !important;
-    padding: 9px 20px !important;
+    padding: 10px 24px !important;
+    font-size: 14px !important;
     color: var(--text-primary) !important;
+    background: var(--bg-tertiary) !important;
     border: 1px solid var(--border) !important;
+    transition: all 0.15s !important;
 }
-.swal-toast-custom {
+.swal-cancel-btn:hover { background: var(--bg-active) !important; }
+.swal-deny-btn {
+    border-radius: 10px !important;
     font-family: var(--font-main) !important;
+    font-weight: 500 !important;
+    padding: 10px 24px !important;
     font-size: 14px !important;
 }
-[data-theme="dark"] .swal-toast-custom {
+
+/* Inputs inside Swal */
+.swal2-input, .swal2-textarea {
+    background: var(--bg-input, var(--bg-primary)) !important;
+    border: 1px solid var(--border) !important;
+    color: var(--text-primary) !important;
+    border-radius: 10px !important;
+    font-family: var(--font-main) !important;
+    font-size: 14px !important;
+    padding: 10px 14px !important;
+    transition: border-color 0.2s, box-shadow 0.2s !important;
+}
+.swal2-input:focus, .swal2-textarea:focus {
+    border-color: var(--accent) !important;
+    box-shadow: 0 0 0 3px var(--accent-bg, rgba(109,140,255,0.15)) !important;
+}
+
+/* Modal body (openModal) */
+.swal-modal-body { overflow: visible !important; }
+.swal-modal-body .form-group { margin-bottom: 14px; }
+.swal-modal-body label { display:block; font-size:13px; font-weight:500; color:var(--text-secondary); margin-bottom:5px; }
+.swal-modal-body .form-control,
+.swal-modal-body input[type="text"],
+.swal-modal-body input[type="password"],
+.swal-modal-body input[type="email"],
+.swal-modal-body input[type="number"],
+.swal-modal-body input[type="date"],
+.swal-modal-body select,
+.swal-modal-body textarea {
+    width: 100%;
+    padding: 10px 14px;
+    background: var(--bg-input, var(--bg-primary));
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    color: var(--text-primary);
+    font-size: 14px;
+    font-family: var(--font-main);
+    box-sizing: border-box;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+.swal-modal-body input:focus,
+.swal-modal-body select:focus,
+.swal-modal-body textarea:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-bg, rgba(109,140,255,0.15));
+}
+
+/* Toast */
+.swal2-popup.swal-toast-custom {
+    font-family: var(--font-main) !important;
+    font-size: 14px !important;
     background: var(--bg-card) !important;
     color: var(--text-primary) !important;
     border: 1px solid var(--border) !important;
+    border-radius: 12px !important;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.25) !important;
+    padding: 10px 16px !important;
 }
-/* Ícone de confirmação com cor do tema */
-[data-theme="dark"] .swal2-icon.swal2-question {
-    border-color: var(--accent) !important;
-    color: var(--accent) !important;
-}
-[data-theme="dark"] .swal2-icon.swal2-warning {
-    border-color: var(--warning) !important;
-    color: var(--warning) !important;
+.swal2-popup.swal-toast-custom .swal2-title { font-size: 13px !important; font-weight: 500 !important; }
+.swal2-popup.swal-toast-custom .swal2-timer-progress-bar { background: var(--accent) !important; }
+
+/* Validation message */
+.swal2-validation-message {
+    background: var(--bg-tertiary) !important;
+    color: var(--danger) !important;
+    font-family: var(--font-main) !important;
+    border-radius: 8px !important;
 }
 
 /* x-spreadsheet dark mode */

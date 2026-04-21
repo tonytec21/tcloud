@@ -11,23 +11,27 @@ class Auth {
      */
     public static function init(): void {
         if (session_status() === PHP_SESSION_NONE) {
+            // Extend session lifetime for long operations (uploads)
+            ini_set('session.gc_maxlifetime', SESSION_LIFETIME);
             session_name(SESSION_NAME);
             session_set_cookie_params([
                 'lifetime' => SESSION_LIFETIME,
                 'path'     => '/',
                 'secure'   => isset($_SERVER['HTTPS']),
                 'httponly'  => true,
-                'samesite'  => 'Strict'
+                'samesite'  => 'Lax'
             ]);
             session_start();
         }
-        // Regenerar ID periodicamente
+        // Regenerar ID periodicamente (keep old session alive to avoid breaking concurrent requests)
         if (!isset($_SESSION['_created'])) {
             $_SESSION['_created'] = time();
-        } elseif (time() - $_SESSION['_created'] > 1800) {
-            session_regenerate_id(true);
+        } elseif (time() - $_SESSION['_created'] > 3600) {
+            session_regenerate_id(false); // false = keep old session valid
             $_SESSION['_created'] = time();
         }
+        // Touch session activity
+        $_SESSION['_last_activity'] = time();
     }
 
     /**

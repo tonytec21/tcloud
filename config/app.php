@@ -35,7 +35,7 @@ define('CHUNK_SIZE', 5 * 1024 * 1024); // 5MB para chunked upload
 // Segurança
 define('CSRF_TOKEN_NAME', 'cv_csrf_token');
 define('SESSION_NAME', 'tcloud_session');
-define('SESSION_LIFETIME', 7200); // 2 horas
+define('SESSION_LIFETIME', 86400); // 24 horas
 define('PASSWORD_MIN_LENGTH', 8);
 define('MAX_LOGIN_ATTEMPTS', 5);
 define('LOCKOUT_DURATION', 900); // 15 minutos
