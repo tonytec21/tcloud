@@ -1152,7 +1152,7 @@ const CV = {
         document.getElementById('folderInput').value = '';
     },
 
-    // ==================== UPLOAD QUEUE ====================
+    // ==================== UPLOAD QUEUE (batch processing) ====================
     _uploadQueue: [],
     _uploadRunning: false,
 
@@ -1160,109 +1160,128 @@ const CV = {
         const panel = document.getElementById('uploadPanel');
         const body = document.getElementById('uploadPanelBody');
         panel.classList.add('show');
+        const BATCH_SIZE = 100;
+        const CHUNK_SIZE = 50 * 1024 * 1024;
 
-        // Step 1: Create all folder paths first (including empty ones)
+        // ── Step 1: Create folders in batches ──
         if (folderPaths && folderPaths.length) {
-            const foldersId = 'upload_folders_' + Date.now();
-            body.insertAdjacentHTML('afterbegin', `
-                <div class="upload-item" id="${foldersId}">
-                    <i class="bi bi-folder-plus" style="font-size:20px;color:var(--text-muted)"></i>
-                    <div class="upload-info">
-                        <div class="upload-name">Criando ${folderPaths.length} pasta(s)...</div>
-                        <div class="upload-progress"><div class="upload-progress-bar" style="width:0%"></div></div>
-                        <div class="upload-status">Preparando...</div>
-                    </div>
-                </div>
-            `);
-            // Create unique folder paths
             const uniquePaths = [...new Set(folderPaths)].sort();
+            const foldersId = 'uq_folders_' + Date.now();
+            body.innerHTML = `
+                <div class="upload-item" id="${foldersId}">
+                    <i class="bi bi-folder-plus" style="font-size:20px;color:var(--warning)"></i>
+                    <div class="upload-info">
+                        <div class="upload-name" style="font-weight:600">Criando ${uniquePaths.length} pasta(s)...</div>
+                        <div class="upload-progress"><div class="upload-progress-bar" style="width:0%"></div></div>
+                        <div class="upload-status">0 / ${uniquePaths.length}</div>
+                    </div>
+                </div>`;
             for (let i = 0; i < uniquePaths.length; i++) {
                 await this.api('create_folder_path', { path: uniquePaths[i], folder_id: this.state.currentFolder || '' });
                 const el = document.getElementById(foldersId);
-                if (el) {
+                if (el && (i % 10 === 0 || i === uniquePaths.length - 1)) {
                     const pct = Math.round(((i + 1) / uniquePaths.length) * 100);
                     el.querySelector('.upload-progress-bar').style.width = pct + '%';
-                    el.querySelector('.upload-status').textContent = (i + 1) + '/' + uniquePaths.length;
+                    el.querySelector('.upload-status').textContent = (i + 1) + ' / ' + uniquePaths.length;
                 }
             }
-            const el = document.getElementById(foldersId);
-            if (el) {
-                el.classList.add('complete');
-                el.querySelector('.upload-status').textContent = 'Pastas criadas';
-                el.querySelector('.upload-progress-bar').style.width = '100%';
-            }
+            this.refresh();
         }
 
-        // Step 2: Queue all files
+        // ── Step 2: Upload files in batches ──
         if (!files.length) { this.refresh(); return; }
 
         const totalFiles = files.length;
-        const queueHeaderId = 'upload_header_' + Date.now();
-        body.insertAdjacentHTML('afterbegin', `
-            <div class="upload-item" id="${queueHeaderId}" style="background:var(--bg-tertiary)">
-                <i class="bi bi-cloud-arrow-up" style="font-size:20px;color:var(--accent)"></i>
+        const totalBatches = Math.ceil(totalFiles / BATCH_SIZE);
+        let completed = 0, errors = 0;
+
+        // Show main progress header
+        body.innerHTML = `
+            <div class="upload-item" id="uq_header" style="background:var(--bg-tertiary);border-bottom:2px solid var(--accent)">
+                <i class="bi bi-cloud-arrow-up" style="font-size:22px;color:var(--accent)"></i>
                 <div class="upload-info">
-                    <div class="upload-name" style="font-weight:600">${totalFiles} arquivo(s) na fila</div>
-                    <div class="upload-progress"><div class="upload-progress-bar" style="width:0%"></div></div>
-                    <div class="upload-status" id="queueStatus">Iniciando...</div>
+                    <div class="upload-name" style="font-weight:600" id="uq_title">${totalFiles.toLocaleString()} arquivo(s) — Lote 1 de ${totalBatches}</div>
+                    <div class="upload-progress"><div class="upload-progress-bar" id="uq_bar" style="width:0%"></div></div>
+                    <div class="upload-status" id="uq_status">Iniciando...</div>
                 </div>
             </div>
-        `);
+            <div id="uq_batch_items"></div>`;
 
-        const CHUNK_SIZE = 50 * 1024 * 1024;
-        let completed = 0;
-        let errors = 0;
+        // Process each batch
+        for (let b = 0; b < totalBatches; b++) {
+            const batchStart = b * BATCH_SIZE;
+            const batchEnd = Math.min(batchStart + BATCH_SIZE, totalFiles);
+            const batchFiles = files.slice(batchStart, batchEnd);
+            const batchNum = b + 1;
 
-        // Process one file at a time
-        for (let i = 0; i < files.length; i++) {
-            const file = files[i];
-            const relativePath = file.webkitRelativePath || '';
-            const displayName = relativePath || file.name;
-            const itemId = 'upload_' + Date.now() + '_' + i;
+            // Update header
+            const uqTitle = document.getElementById('uq_title');
+            if (uqTitle) uqTitle.textContent = totalFiles.toLocaleString() + ' arquivo(s) \u2014 Lote ' + batchNum + ' de ' + totalBatches;
 
-            // Update queue header
-            const qh = document.getElementById(queueHeaderId);
-            if (qh) {
-                const pct = Math.round((completed / totalFiles) * 100);
-                qh.querySelector('.upload-progress-bar').style.width = pct + '%';
-                qh.querySelector('#queueStatus').textContent = (completed + 1) + ' de ' + totalFiles + ' — ' + this.esc(file.name).substring(0, 40);
-            }
+            // Clear previous batch items from DOM
+            const batchContainer = document.getElementById('uq_batch_items');
+            if (batchContainer) batchContainer.innerHTML = '';
 
-            // Add individual file item
-            body.insertAdjacentHTML('afterbegin', `
-                <div class="upload-item" id="${itemId}">
-                    <i class="bi bi-file-earmark" style="font-size:20px;color:var(--text-muted)"></i>
-                    <div class="upload-info">
-                        <div class="upload-name" style="font-size:12px">${this.esc(displayName)}</div>
-                        <div class="upload-progress"><div class="upload-progress-bar" style="width:0%"></div></div>
-                        <div class="upload-status">Enviando...</div>
-                    </div>
-                </div>
-            `);
+            // Process each file in the batch sequentially
+            for (let i = 0; i < batchFiles.length; i++) {
+                const file = batchFiles[i];
+                const relativePath = file.webkitRelativePath || '';
+                const displayName = relativePath || file.name;
+                const itemId = 'uq_f_' + Date.now() + '_' + i;
+                const globalIdx = batchStart + i + 1;
 
-            try {
-                if (file.size > CHUNK_SIZE) {
-                    await this._uploadChunked(file, itemId, CHUNK_SIZE);
-                } else {
-                    await this._uploadNormal(file, itemId);
+                // Update header progress
+                const uqBar = document.getElementById('uq_bar');
+                const uqStatus = document.getElementById('uq_status');
+                if (uqBar) uqBar.style.width = Math.round((completed / totalFiles) * 100) + '%';
+                if (uqStatus) uqStatus.textContent = completed.toLocaleString() + ' / ' + totalFiles.toLocaleString() + ' \u2014 ' + file.name.substring(0, 50);
+
+                // Add item to batch container (prepend)
+                if (batchContainer) {
+                    batchContainer.insertAdjacentHTML('afterbegin', `
+                        <div class="upload-item" id="${itemId}">
+                            <i class="bi bi-file-earmark" style="font-size:18px;color:var(--text-muted)"></i>
+                            <div class="upload-info">
+                                <div class="upload-name" style="font-size:11px;opacity:0.8">${this.esc(displayName).substring(0, 60)}</div>
+                                <div class="upload-progress"><div class="upload-progress-bar" style="width:0%"></div></div>
+                                <div class="upload-status" style="font-size:10px">Enviando...</div>
+                            </div>
+                        </div>`);
+                    // Keep max 20 visible items to prevent DOM bloat
+                    while (batchContainer.children.length > 20) {
+                        batchContainer.removeChild(batchContainer.lastChild);
+                    }
                 }
-                completed++;
-            } catch (e) {
-                errors++;
-                const el = document.getElementById(itemId);
-                if (el) { el.classList.add('error'); el.querySelector('.upload-status').textContent = 'Erro: ' + (e.message||'falha'); }
+
+                try {
+                    if (file.size > CHUNK_SIZE) {
+                        await this._uploadChunked(file, itemId, CHUNK_SIZE);
+                    } else {
+                        await this._uploadNormal(file, itemId);
+                    }
+                    completed++;
+                } catch (e) {
+                    errors++;
+                    const el = document.getElementById(itemId);
+                    if (el) { el.classList.add('error'); el.querySelector('.upload-status').textContent = 'Erro'; }
+                }
             }
+
+            // Refresh file list after each batch
+            this.refresh();
         }
 
         // Final status
-        const qh = document.getElementById(queueHeaderId);
-        if (qh) {
-            qh.classList.add('complete');
-            qh.querySelector('.upload-progress-bar').style.width = '100%';
-            qh.querySelector('#queueStatus').textContent = completed + ' enviado(s)' + (errors ? ', ' + errors + ' erro(s)' : '') + ' — Concluído';
-        }
-
-        this.refresh();
+        const uqBar = document.getElementById('uq_bar');
+        const uqStatus = document.getElementById('uq_status');
+        const uqTitle = document.getElementById('uq_title');
+        const uqHeader = document.getElementById('uq_header');
+        if (uqBar) uqBar.style.width = '100%';
+        if (uqTitle) uqTitle.textContent = completed.toLocaleString() + ' arquivo(s) enviado(s)';
+        if (uqStatus) uqStatus.textContent = 'Conclu\u00eddo' + (errors ? ' \u2014 ' + errors + ' erro(s)' : '');
+        if (uqHeader) uqHeader.classList.add('complete');
+        const bc = document.getElementById('uq_batch_items');
+        if (bc) bc.innerHTML = '';
     },
 
     // Normal upload (single request)
