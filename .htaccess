@@ -1,0 +1,55 @@
+# TCloud - Apache Configuration
+# Segurança e rewrite rules
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    
+    # Bloquear acesso direto a arquivos de configuração
+    RewriteRule ^config/ - [F,L]
+    RewriteRule ^core/ - [F,L]
+    RewriteRule ^models/ - [F,L]
+    RewriteRule ^controllers/ - [F,L]
+    RewriteRule ^storage/ - [F,L]
+    RewriteRule ^logs/ - [F,L]
+    RewriteRule ^migrations/ - [F,L]
+    RewriteRule ^bootstrap\.php$ - [F,L]
+</IfModule>
+
+# Headers de segurança
+<IfModule mod_headers.c>
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set X-Frame-Options "SAMEORIGIN"
+    Header always set X-XSS-Protection "1; mode=block"
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+</IfModule>
+
+# Bloquear acesso a arquivos ocultos
+<FilesMatch "^\.">
+    Order allow,deny
+    Deny from all
+</FilesMatch>
+
+# Impedir listagem de diretórios
+Options -Indexes
+
+# PHP settings (mod_php - Apache module)
+<IfModule mod_php.c>
+    php_value upload_max_filesize 20G
+    php_value post_max_size 21G
+    php_value max_execution_time 0
+    php_value max_input_time -1
+    php_value memory_limit 512M
+    php_flag display_errors Off
+    php_flag html_errors Off
+</IfModule>
+
+# PHP settings (PHP 8+ module name)
+<IfModule php_module>
+    php_value upload_max_filesize 20G
+    php_value post_max_size 21G
+    php_value max_execution_time 0
+    php_value max_input_time -1
+    php_value memory_limit 512M
+    php_flag display_errors Off
+    php_flag html_errors Off
+</IfModule>

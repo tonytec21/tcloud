@@ -1,0 +1,23 @@
+# Bloquear acesso direto e execução de scripts
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule .* - [F,L]
+</IfModule>
+
+# Fallback
+Order deny,allow
+Deny from all
+
+# Impedir execução de PHP
+<FilesMatch "\.ph(p[3-7]?|tml|ar)$">
+    Order deny,allow
+    Deny from all
+</FilesMatch>
+
+# Desativar handlers
+RemoveHandler .php .phtml .php3 .php4 .php5 .phps .phar
+RemoveType .php .phtml .php3 .php4 .php5 .phps .phar
+
+<IfModule mod_php.c>
+    php_flag engine off
+</IfModule>
