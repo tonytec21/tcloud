@@ -543,6 +543,35 @@ try {
             jsonResponse(['success' => true, 'zip_token' => basename($zipPath)]);
             break;
 
+        case 'list_folder_files':
+            if (!Auth::can('files.view')) jsonResponse(['success' => false, 'message' => 'Sem permissão.'], 403);
+            $folderId = (int)input('folder_id');
+            $db = Database::getInstance();
+            $allFiles = [];
+            $getFolderFiles = function($fid, $basePath) use (&$getFolderFiles, $db, $user, &$allFiles) {
+                // Get files in this folder
+                $stmt = $db->prepare("SELECT id, original_name, size FROM files WHERE folder_id = ? AND user_id = ? AND is_trashed = 0");
+                $stmt->execute([$fid, $user['id']]);
+                while ($f = $stmt->fetch()) {
+                    $allFiles[] = ['id' => (int)$f['id'], 'name' => $f['original_name'], 'path' => $basePath . $f['original_name'], 'size' => (int)$f['size']];
+                }
+                // Recurse into subfolders
+                $stmt2 = $db->prepare("SELECT id, name FROM folders WHERE parent_id = ? AND user_id = ? AND is_trashed = 0");
+                $stmt2->execute([$fid, $user['id']]);
+                while ($sub = $stmt2->fetch()) {
+                    $getFolderFiles((int)$sub['id'], $basePath . $sub['name'] . '/');
+                }
+            };
+            // Get folder name
+            $folderStmt = $db->prepare("SELECT name FROM folders WHERE id = ? AND user_id = ?");
+            $folderStmt->execute([$folderId, $user['id']]);
+            $folderRow = $folderStmt->fetch();
+            $folderName = $folderRow ? $folderRow['name'] : 'pasta';
+            $getFolderFiles($folderId, $folderName . '/');
+            $totalSize = array_sum(array_column($allFiles, 'size'));
+            jsonResponse(['success' => true, 'files' => $allFiles, 'folder_name' => $folderName, 'total_size' => $totalSize, 'total_files' => count($allFiles)]);
+            break;
+
         case 'extract_zip':
             jsonResponse($fm->extractZip((int)input('id'), input('folder_id') ? (int)input('folder_id') : null));
             break;

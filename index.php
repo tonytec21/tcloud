@@ -851,6 +851,7 @@ const CV = {
             }
             if (type === 'folder') {
                 html += this.ctxItem('bi-folder2-open', 'Abrir', `CV.loadFolder(${id})`);
+                html += this.ctxItem('bi-download', 'Baixar pasta', `CV.downloadFolder(${id})`);
                 html += '<div class="context-menu-divider"></div>';
             }
             html += this.ctxItem('bi-pencil', 'Renomear', `CV.showRenameModal('${type}',${id})`);
@@ -1259,17 +1260,166 @@ const CV = {
     batchCopy() { this.showMoveModal(this.state.selectedItems, 'copy'); },
     batchTrash() { this.trashItems(this.state.selectedItems); },
     async batchDownload() {
-        const fileIds = this.state.selectedItems.filter(i => i.type === 'file').map(i => i.id);
-        const folderIds = this.state.selectedItems.filter(i => i.type === 'folder').map(i => i.id);
-        if (!fileIds.length && !folderIds.length) return;
-        this.toast('Criando ZIP...', 'info');
-        const result = await this.api('download_zip', {
-            file_ids: JSON.stringify(fileIds),
-            folder_ids: JSON.stringify(folderIds)
-        });
-        if (result.success) {
-            window.open(`api/download.php?zip_token=${result.zip_token}`, '_blank');
+        const items = this.state.selectedItems;
+        if (!items.length) return;
+
+        // If only files selected (no folders), download individually
+        const files = items.filter(i => i.type === 'file');
+        const folders = items.filter(i => i.type === 'folder');
+
+        const allFiles = [];
+
+        // Collect individual files
+        for (const f of files) {
+            const info = (this.state.items.files || []).find(x => x.id == f.id);
+            allFiles.push({ id: f.id, name: info ? info.original_name : 'file_' + f.id, size: info ? info.size : 0 });
         }
+
+        // Collect folder files recursively
+        for (const folder of folders) {
+            const result = await this.api('list_folder_files', { folder_id: folder.id });
+            if (result.success && result.files) {
+                allFiles.push(...result.files);
+            }
+        }
+
+        if (!allFiles.length) { this.toast('Nenhum arquivo para baixar.', 'info'); return; }
+
+        await this._downloadQueue(allFiles);
+    },
+
+    async downloadFolder(folderId) {
+        const result = await this.api('list_folder_files', { folder_id: folderId });
+        if (!result.success) { this.toast(result.message || 'Erro', 'error'); return; }
+        if (!result.files || !result.files.length) { this.toast('Pasta vazia.', 'info'); return; }
+
+        const ok = await Swal.fire({
+            title: 'Baixar pasta',
+            html: '<b>' + this.esc(result.folder_name) + '</b><br>' +
+                  result.total_files.toLocaleString() + ' arquivo(s) \u2014 ' + this.formatSize(result.total_size),
+            icon: 'question',
+            showCancelButton: true,
+            confirmButtonText: 'Baixar tudo',
+            cancelButtonText: 'Cancelar',
+            confirmButtonColor: 'var(--accent)',
+            background: 'var(--bg-modal)', color: 'var(--text-primary)',
+            customClass: { popup: 'swal-custom-popup', confirmButton: 'swal-confirm-btn', cancelButton: 'swal-cancel-btn' }
+        });
+        if (!ok.isConfirmed) return;
+
+        await this._downloadQueue(result.files);
+    },
+
+    async _downloadQueue(files) {
+        const panel = document.getElementById('uploadPanel');
+        const body = document.getElementById('uploadPanelBody');
+        panel.classList.add('show');
+        body.style.display = '';
+
+        const u = this._uq;
+        u.running = true; u.paused = false; u.cancelled = false;
+
+        const total = files.length;
+        let completed = 0, errors = 0;
+        const totalSize = files.reduce((s, f) => s + (f.size || 0), 0);
+        let bytesDone = 0;
+        const startTime = Date.now();
+
+        // Setup header
+        document.getElementById('uqIcon').className = 'bi bi-download';
+        document.getElementById('uqIcon').style.color = 'var(--accent)';
+        document.getElementById('uqHeaderTitle').textContent = '0 / ' + total.toLocaleString() + ' arquivo(s)';
+        document.getElementById('uqHeaderPct').textContent = '0%';
+        const headerBar = document.getElementById('uqHeaderBar');
+        if (headerBar) { headerBar.style.width = '0%'; headerBar.style.background = 'var(--accent)'; }
+        document.getElementById('uqPauseBtn').style.display = '';
+        document.getElementById('uqCancelBtn').style.display = '';
+        document.getElementById('uqStats').style.display = 'flex';
+        const fileList = document.getElementById('uqFileList');
+        fileList.innerHTML = '';
+
+        // Session keepalive
+        const keepalive = setInterval(() => {
+            fetch('api/index.php', { method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: 'action=heartbeat' }).catch(() => {});
+        }, 60000);
+
+        for (let i = 0; i < files.length; i++) {
+            if (u.cancelled) break;
+            while (u.paused && !u.cancelled) await new Promise(r => setTimeout(r, 500));
+            if (u.cancelled) break;
+
+            const file = files[i];
+            const itemId = 'dl_' + i;
+            const displayName = file.path || file.name;
+
+            fileList.insertAdjacentHTML('afterbegin',
+                '<div class="uq-file-item" id="' + itemId + '">' +
+                '<i class="bi bi-file-earmark-arrow-down" style="font-size:16px;color:var(--accent)"></i>' +
+                '<div class="uq-info"><div class="uq-name">' + this.esc(displayName) + '</div>' +
+                '<div class="uq-detail">' + this.formatSize(file.size || 0) + '</div></div>' +
+                '<span class="uq-pct" style="color:var(--accent)"><i class="bi bi-arrow-repeat spin" style="font-size:12px"></i></span></div>');
+            while (fileList.children.length > 30) fileList.removeChild(fileList.lastChild);
+
+            try {
+                // Download via hidden iframe to trigger browser save dialog
+                await new Promise((resolve, reject) => {
+                    const a = document.createElement('a');
+                    a.href = 'api/download.php?type=file&id=' + file.id;
+                    a.download = file.name || '';
+                    a.style.display = 'none';
+                    document.body.appendChild(a);
+                    a.click();
+                    // Stagger downloads to avoid overwhelming the browser
+                    setTimeout(() => {
+                        document.body.removeChild(a);
+                        resolve();
+                    }, 300);
+                });
+                completed++;
+                bytesDone += file.size || 0;
+                const el = document.getElementById(itemId);
+                if (el) { el.classList.add('complete'); el.querySelector('.uq-pct').textContent = '\u2714'; }
+            } catch (e) {
+                errors++;
+                const el = document.getElementById(itemId);
+                if (el) { el.classList.add('error'); el.querySelector('.uq-pct').textContent = '\u2718'; }
+            }
+
+            // Update header
+            const pct = Math.round(((i + 1) / total) * 100);
+            if (headerBar) headerBar.style.width = pct + '%';
+            document.getElementById('uqHeaderTitle').textContent = (i + 1).toLocaleString() + ' / ' + total.toLocaleString();
+            document.getElementById('uqHeaderPct').textContent = pct + '%';
+
+            // Speed
+            const elapsed = (Date.now() - startTime) / 1000;
+            const stats = document.getElementById('uqStatsText');
+            if (stats && elapsed > 1) {
+                const speed = bytesDone / elapsed;
+                stats.textContent = this.formatSize(bytesDone) + ' \u2014 ' + this.formatSize(Math.round(speed)) + '/s';
+            }
+        }
+
+        // Finish
+        clearInterval(keepalive);
+        u.running = false;
+        document.getElementById('uqPauseBtn').style.display = 'none';
+        document.getElementById('uqCancelBtn').style.display = 'none';
+        const finalIcon = u.cancelled ? 'bi-exclamation-circle' : 'bi-check-circle-fill';
+        const finalColor = u.cancelled ? 'var(--warning)' : 'var(--success)';
+        document.getElementById('uqIcon').className = 'bi ' + finalIcon;
+        document.getElementById('uqIcon').style.color = finalColor;
+        if (headerBar) { headerBar.style.width = '100%'; headerBar.style.background = finalColor; }
+        document.getElementById('uqHeaderTitle').textContent = u.cancelled
+            ? 'Download cancelado'
+            : completed.toLocaleString() + ' arquivo(s) baixado(s)' + (errors ? ' \u2014 ' + errors + ' erro(s)' : '');
+        document.getElementById('uqHeaderPct').textContent = u.cancelled ? '' : '100%';
+        const elapsed = Math.round((Date.now() - startTime) / 1000);
+        const min = Math.floor(elapsed / 60), sec = elapsed % 60;
+        const stats = document.getElementById('uqStatsText');
+        if (stats) stats.textContent = 'Tempo: ' + (min ? min + 'min ' : '') + sec + 's \u2014 ' + this.formatSize(bytesDone);
     },
 
     // ==================== SHARE MODAL ====================
@@ -1871,7 +2021,12 @@ const CV = {
     },
 
     downloadFile(id) {
-        window.open(`api/download.php?type=file&id=${id}`, '_blank');
+        const a = document.createElement('a');
+        a.href = 'api/download.php?type=file&id=' + id;
+        a.download = '';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
     },
 
     downloadPreviewFile() {
