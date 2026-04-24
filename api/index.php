@@ -53,7 +53,7 @@ if (!in_array($action, $publicActions) && !Auth::check()) {
 }
 
 // Validar CSRF em operações de escrita
-$csrfExempt = ['login', 'share_access', 'unlock_file', 'gw_discard', 'google_cleanup', 'heartbeat', 'poll_updates'];
+$csrfExempt = ['login', 'share_access', 'unlock_file', 'gw_discard', 'google_cleanup', 'heartbeat', 'poll_updates', 'check_download'];
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && !in_array($action, $csrfExempt)) {
     $token = $_SERVER['HTTP_X_CSRF_TOKEN'] ?? input('csrf_token', '');
     if (!Auth::validateCsrf($token)) {
@@ -541,6 +541,61 @@ try {
             $zipPath = $fm->createZip($fileIds, $folderIds);
             if (!$zipPath) jsonResponse(['success' => false, 'message' => 'Erro ao criar ZIP.']);
             jsonResponse(['success' => true, 'zip_token' => basename($zipPath)]);
+            break;
+
+        case 'prepare_download':
+            if (!Auth::can('files.view')) jsonResponse(['success' => false, 'message' => 'Sem permissão.'], 403);
+            $folderIds = json_decode(input('folder_ids', '[]'), true);
+            $fileIds = json_decode(input('file_ids', '[]'), true);
+            $folderName = input('folder_name', 'download');
+            $jobId = uniqid('dl_', true);
+            $jobId = str_replace('.', '_', $jobId);
+            $statusFile = TEMP_PATH . '/dlprep_' . $jobId . '.json';
+            // Write job data
+            file_put_contents($statusFile, json_encode([
+                'status' => 'queued',
+                'user_id' => $user['id'],
+                'folder_ids' => $folderIds,
+                'file_ids' => $fileIds,
+                'folder_name' => $folderName,
+                'processed' => 0,
+                'total' => 0,
+                'current' => '',
+                'size' => 0,
+                'created_at' => time(),
+                'updated_at' => time()
+            ]));
+            // Launch background process
+            $phpBin = defined('PHP_BINARY') ? PHP_BINARY : 'php';
+            $script = realpath(__DIR__ . '/prepare_download.php');
+            if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+                pclose(popen("start /B \"\" \"{$phpBin}\" \"{$script}\" \"{$jobId}\" > NUL 2>&1", 'r'));
+            } else {
+                exec("{$phpBin} {$script} {$jobId} > /dev/null 2>&1 &");
+            }
+            jsonResponse(['success' => true, 'job_id' => $jobId]);
+            break;
+
+        case 'check_download':
+            $jobId = input('job_id', '');
+            if (!$jobId || !preg_match('/^[a-zA-Z0-9_-]+$/', $jobId)) {
+                jsonResponse(['success' => false, 'message' => 'Job inválido.']);
+            }
+            $statusFile = TEMP_PATH . '/dlprep_' . $jobId . '.json';
+            if (!file_exists($statusFile)) {
+                jsonResponse(['success' => false, 'message' => 'Job não encontrado.']);
+            }
+            $status = json_decode(file_get_contents($statusFile), true);
+            jsonResponse(['success' => true, 'job' => $status]);
+            break;
+
+        case 'cancel_download':
+            $jobId = input('job_id', '');
+            if ($jobId && preg_match('/^[a-zA-Z0-9_-]+$/', $jobId)) {
+                @unlink(TEMP_PATH . '/dlprep_' . $jobId . '.json');
+                @unlink(TEMP_PATH . '/dlzip_' . $jobId . '.zip');
+            }
+            jsonResponse(['success' => true]);
             break;
 
         case 'list_folder_files':

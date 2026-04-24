@@ -19,18 +19,45 @@ $type = input('type', 'file');
 $id = (int)input('id', 0);
 $zipToken = input('zip_token');
 
-// Download de ZIP temporário
+// Download de ZIP temporário (prepared download)
 if ($zipToken) {
+    // Support both old format (download_xxx.zip) and new format (dlzip_xxx.zip via job_id)
     $zipPath = TEMP_PATH . '/' . basename($zipToken);
+    // Also check if it's a job_id
+    if (!file_exists($zipPath)) {
+        $zipPath = TEMP_PATH . '/dlzip_' . basename($zipToken) . '.zip';
+    }
     if (!file_exists($zipPath)) {
         http_response_code(404);
         exit('Arquivo não encontrado.');
     }
+    
+    $zipName = input('name', 'download') . '.zip';
+    $fileSize = filesize($zipPath);
+    
+    while (ob_get_level()) ob_end_clean();
+    
     header('Content-Type: application/zip');
-    header('Content-Disposition: attachment; filename="download.zip"');
-    header('Content-Length: ' . filesize($zipPath));
-    readfile($zipPath);
-    unlink($zipPath);
+    header('Content-Disposition: attachment; filename="' . str_replace('"', '', $zipName) . '"');
+    header('Content-Length: ' . $fileSize);
+    header('Cache-Control: no-store');
+    
+    // Stream in 8MB chunks
+    $handle = fopen($zipPath, 'rb');
+    if ($handle) {
+        while (!feof($handle)) {
+            echo fread($handle, 8 * 1024 * 1024);
+            flush();
+        }
+        fclose($handle);
+    }
+    
+    // Cleanup: delete ZIP and status file after download
+    @unlink($zipPath);
+    // Try to find and clean status file
+    $jobId = str_replace(['dlzip_', '.zip'], '', basename($zipToken));
+    @unlink(TEMP_PATH . '/dlprep_' . $jobId . '.json');
+    
     exit;
 }
 

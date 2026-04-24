@@ -1262,44 +1262,39 @@ const CV = {
     async batchDownload() {
         const items = this.state.selectedItems;
         if (!items.length) return;
-
-        // If only files selected (no folders), download individually
         const files = items.filter(i => i.type === 'file');
         const folders = items.filter(i => i.type === 'folder');
 
-        const allFiles = [];
-
-        // Collect individual files
-        for (const f of files) {
-            const info = (this.state.items.files || []).find(x => x.id == f.id);
-            allFiles.push({ id: f.id, name: info ? info.original_name : 'file_' + f.id, size: info ? info.size : 0 });
+        // Single file — direct download
+        if (files.length === 1 && !folders.length) {
+            this.downloadFile(files[0].id);
+            return;
         }
 
-        // Collect folder files recursively
-        for (const folder of folders) {
-            const result = await this.api('list_folder_files', { folder_id: folder.id });
-            if (result.success && result.files) {
-                allFiles.push(...result.files);
-            }
-        }
-
-        if (!allFiles.length) { this.toast('Nenhum arquivo para baixar.', 'info'); return; }
-
-        await this._downloadQueue(allFiles);
+        // Multiple files or folders — prepare ZIP in background
+        const fileIds = files.map(i => i.id);
+        const folderIds = folders.map(i => i.id);
+        this._startDownloadPrep(fileIds, folderIds, 'download');
     },
 
     async downloadFolder(folderId) {
-        const result = await this.api('list_folder_files', { folder_id: folderId });
-        if (!result.success) { this.toast(result.message || 'Erro', 'error'); return; }
-        if (!result.files || !result.files.length) { this.toast('Pasta vazia.', 'info'); return; }
+        const info = (this.state.items.folders || []).find(f => f.id == folderId);
+        const name = info ? info.name : 'pasta';
+
+        // Get folder stats
+        const stats = await this.api('list_folder_files', { folder_id: folderId });
+        if (!stats.success || !stats.files || !stats.files.length) {
+            this.toast('Pasta vazia.', 'info'); return;
+        }
 
         const ok = await Swal.fire({
             title: 'Baixar pasta',
-            html: '<b>' + this.esc(result.folder_name) + '</b><br>' +
-                  result.total_files.toLocaleString() + ' arquivo(s) \u2014 ' + this.formatSize(result.total_size),
+            html: '<b>' + this.esc(stats.folder_name) + '</b><br>' +
+                  stats.total_files.toLocaleString() + ' arquivo(s) \u2014 ' + this.formatSize(stats.total_size) +
+                  '<br><br><span style="font-size:12px;color:var(--text-muted)">O download será preparado em segundo plano.<br>Você será notificado quando estiver pronto.</span>',
             icon: 'question',
             showCancelButton: true,
-            confirmButtonText: 'Baixar tudo',
+            confirmButtonText: 'Preparar download',
             cancelButtonText: 'Cancelar',
             confirmButtonColor: 'var(--accent)',
             background: 'var(--bg-modal)', color: 'var(--text-primary)',
@@ -1307,119 +1302,179 @@ const CV = {
         });
         if (!ok.isConfirmed) return;
 
-        await this._downloadQueue(result.files);
+        this._startDownloadPrep([], [folderId], stats.folder_name);
     },
 
-    async _downloadQueue(files) {
+    // ==================== DOWNLOAD PREPARATION ====================
+    _dlJobs: [],
+
+    async _startDownloadPrep(fileIds, folderIds, name) {
+        const result = await this.api('prepare_download', {
+            file_ids: JSON.stringify(fileIds),
+            folder_ids: JSON.stringify(folderIds),
+            folder_name: name
+        });
+        if (!result.success) { this.toast(result.message || 'Erro', 'error'); return; }
+
+        const job = { id: result.job_id, name: name, startTime: Date.now() };
+        this._dlJobs.push(job);
+
+        // Show in panel
+        this._showDownloadPrep(job);
+
+        // Start polling this job
+        this._pollDownloadJob(job);
+    },
+
+    _showDownloadPrep(job) {
         const panel = document.getElementById('uploadPanel');
         const body = document.getElementById('uploadPanelBody');
         panel.classList.add('show');
         body.style.display = '';
 
-        const u = this._uq;
-        u.running = true; u.paused = false; u.cancelled = false;
-
-        const total = files.length;
-        let completed = 0, errors = 0;
-        const totalSize = files.reduce((s, f) => s + (f.size || 0), 0);
-        let bytesDone = 0;
-        const startTime = Date.now();
-
-        // Setup header
-        document.getElementById('uqIcon').className = 'bi bi-download';
+        document.getElementById('uqIcon').className = 'bi bi-gear';
         document.getElementById('uqIcon').style.color = 'var(--accent)';
-        document.getElementById('uqHeaderTitle').textContent = '0 / ' + total.toLocaleString() + ' arquivo(s)';
-        document.getElementById('uqHeaderPct').textContent = '0%';
-        const headerBar = document.getElementById('uqHeaderBar');
-        if (headerBar) { headerBar.style.width = '0%'; headerBar.style.background = 'var(--accent)'; }
-        document.getElementById('uqPauseBtn').style.display = '';
+        document.getElementById('uqHeaderTitle').textContent = 'Preparando: ' + job.name;
+        document.getElementById('uqHeaderPct').textContent = '';
+        const bar = document.getElementById('uqHeaderBar');
+        if (bar) { bar.style.width = '0%'; bar.style.background = 'var(--accent)'; }
+        document.getElementById('uqPauseBtn').style.display = 'none';
         document.getElementById('uqCancelBtn').style.display = '';
         document.getElementById('uqStats').style.display = 'flex';
+        document.getElementById('uqStatsText').textContent = 'Listando arquivos...';
+
         const fileList = document.getElementById('uqFileList');
-        fileList.innerHTML = '';
+        fileList.innerHTML =
+            '<div class="uq-file-item" id="dlprep_' + job.id + '">' +
+            '<i class="bi bi-file-zip" style="font-size:20px;color:var(--accent)"></i>' +
+            '<div class="uq-info"><div class="uq-name" style="font-weight:600">' + this.esc(job.name) + '.zip</div>' +
+            '<div class="upload-progress"><div class="upload-progress-bar" id="dlbar_' + job.id + '"></div></div>' +
+            '<div class="uq-detail" id="dld_' + job.id + '">Iniciando preparação...</div></div>' +
+            '<span class="uq-pct" id="dlp_' + job.id + '" style="color:var(--accent)"><i class="bi bi-arrow-repeat spin" style="font-size:14px"></i></span></div>';
 
-        // Session keepalive
-        const keepalive = setInterval(() => {
-            fetch('api/index.php', { method: 'POST',
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                body: 'action=heartbeat' }).catch(() => {});
-        }, 60000);
+        // Override cancel button for this job
+        document.getElementById('uqCancelBtn').onclick = async () => {
+            await this.api('cancel_download', { job_id: job.id });
+            this._dlJobs = this._dlJobs.filter(j => j.id !== job.id);
+            this.toast('Download cancelado.', 'info');
+            document.getElementById('uploadPanel').classList.remove('show');
+        };
+    },
 
-        for (let i = 0; i < files.length; i++) {
-            if (u.cancelled) break;
-            while (u.paused && !u.cancelled) await new Promise(r => setTimeout(r, 500));
-            if (u.cancelled) break;
+    async _pollDownloadJob(job) {
+        const poll = async () => {
+            // Check if job was cancelled
+            if (!this._dlJobs.find(j => j.id === job.id)) return;
 
-            const file = files[i];
-            const itemId = 'dl_' + i;
-            const displayName = file.path || file.name;
+            const r = await this.api('check_download', { job_id: job.id });
+            if (!r.success) return;
 
-            fileList.insertAdjacentHTML('afterbegin',
-                '<div class="uq-file-item" id="' + itemId + '">' +
-                '<i class="bi bi-file-earmark-arrow-down" style="font-size:16px;color:var(--accent)"></i>' +
-                '<div class="uq-info"><div class="uq-name">' + this.esc(displayName) + '</div>' +
-                '<div class="uq-detail">' + this.formatSize(file.size || 0) + '</div></div>' +
-                '<span class="uq-pct" style="color:var(--accent)"><i class="bi bi-arrow-repeat spin" style="font-size:12px"></i></span></div>');
-            while (fileList.children.length > 30) fileList.removeChild(fileList.lastChild);
-
-            try {
-                // Download via hidden iframe to trigger browser save dialog
-                await new Promise((resolve, reject) => {
-                    const a = document.createElement('a');
-                    a.href = 'api/download.php?type=file&id=' + file.id;
-                    a.download = file.name || '';
-                    a.style.display = 'none';
-                    document.body.appendChild(a);
-                    a.click();
-                    // Stagger downloads to avoid overwhelming the browser
-                    setTimeout(() => {
-                        document.body.removeChild(a);
-                        resolve();
-                    }, 300);
-                });
-                completed++;
-                bytesDone += file.size || 0;
-                const el = document.getElementById(itemId);
-                if (el) { el.classList.add('complete'); el.querySelector('.uq-pct').textContent = '\u2714'; }
-            } catch (e) {
-                errors++;
-                const el = document.getElementById(itemId);
-                if (el) { el.classList.add('error'); el.querySelector('.uq-pct').textContent = '\u2718'; }
-            }
-
-            // Update header
-            const pct = Math.round(((i + 1) / total) * 100);
-            if (headerBar) headerBar.style.width = pct + '%';
-            document.getElementById('uqHeaderTitle').textContent = (i + 1).toLocaleString() + ' / ' + total.toLocaleString();
-            document.getElementById('uqHeaderPct').textContent = pct + '%';
-
-            // Speed
-            const elapsed = (Date.now() - startTime) / 1000;
+            const s = r.job;
+            const bar = document.getElementById('dlbar_' + job.id);
+            const detail = document.getElementById('dld_' + job.id);
+            const pctEl = document.getElementById('dlp_' + job.id);
+            const headerBar = document.getElementById('uqHeaderBar');
+            const headerTitle = document.getElementById('uqHeaderTitle');
+            const headerPct = document.getElementById('uqHeaderPct');
             const stats = document.getElementById('uqStatsText');
-            if (stats && elapsed > 1) {
-                const speed = bytesDone / elapsed;
-                stats.textContent = this.formatSize(bytesDone) + ' \u2014 ' + this.formatSize(Math.round(speed)) + '/s';
-            }
-        }
 
-        // Finish
-        clearInterval(keepalive);
-        u.running = false;
-        document.getElementById('uqPauseBtn').style.display = 'none';
-        document.getElementById('uqCancelBtn').style.display = 'none';
-        const finalIcon = u.cancelled ? 'bi-exclamation-circle' : 'bi-check-circle-fill';
-        const finalColor = u.cancelled ? 'var(--warning)' : 'var(--success)';
-        document.getElementById('uqIcon').className = 'bi ' + finalIcon;
-        document.getElementById('uqIcon').style.color = finalColor;
-        if (headerBar) { headerBar.style.width = '100%'; headerBar.style.background = finalColor; }
-        document.getElementById('uqHeaderTitle').textContent = u.cancelled
-            ? 'Download cancelado'
-            : completed.toLocaleString() + ' arquivo(s) baixado(s)' + (errors ? ' \u2014 ' + errors + ' erro(s)' : '');
-        document.getElementById('uqHeaderPct').textContent = u.cancelled ? '' : '100%';
-        const elapsed = Math.round((Date.now() - startTime) / 1000);
-        const min = Math.floor(elapsed / 60), sec = elapsed % 60;
-        const stats = document.getElementById('uqStatsText');
-        if (stats) stats.textContent = 'Tempo: ' + (min ? min + 'min ' : '') + sec + 's \u2014 ' + this.formatSize(bytesDone);
+            if (s.status === 'scanning') {
+                if (detail) detail.textContent = 'Listando arquivos...';
+                if (stats) stats.textContent = 'Escaneando pasta...';
+                setTimeout(poll, 2000);
+            }
+            else if (s.status === 'preparing') {
+                const pct = s.total ? Math.round((s.processed / s.total) * 100) : 0;
+                if (bar) bar.style.width = pct + '%';
+                if (pctEl) pctEl.textContent = pct + '%';
+                if (detail) detail.textContent = s.processed.toLocaleString() + ' / ' + s.total.toLocaleString() + ' \u2014 ' + (s.current || '');
+                if (headerBar) headerBar.style.width = pct + '%';
+                if (headerTitle) headerTitle.textContent = 'Compactando: ' + job.name;
+                if (headerPct) headerPct.textContent = pct + '%';
+                if (stats) stats.textContent = s.processed.toLocaleString() + ' de ' + s.total.toLocaleString() + ' arquivo(s)';
+                setTimeout(poll, 2000);
+            }
+            else if (s.status === 'ready') {
+                // ZIP is ready!
+                if (bar) bar.style.width = '100%';
+                if (bar) bar.style.background = 'var(--success)';
+                if (pctEl) pctEl.innerHTML = '<i class="bi bi-check-circle-fill" style="color:var(--success);font-size:18px"></i>';
+                if (detail) detail.textContent = s.total.toLocaleString() + ' arquivo(s) \u2014 ' + this.formatSize(s.size);
+                if (headerBar) { headerBar.style.width = '100%'; headerBar.style.background = 'var(--success)'; }
+                if (headerTitle) headerTitle.textContent = 'Pronto para download!';
+                if (headerPct) headerPct.textContent = '';
+                if (stats) stats.textContent = this.formatSize(s.size);
+
+                document.getElementById('uqIcon').className = 'bi bi-check-circle-fill';
+                document.getElementById('uqIcon').style.color = 'var(--success)';
+                document.getElementById('uqCancelBtn').style.display = 'none';
+
+                // Show download button in file list
+                const item = document.getElementById('dlprep_' + job.id);
+                if (item) {
+                    item.insertAdjacentHTML('beforeend',
+                        '<button class="btn btn-primary btn-sm" id="dlbtn_' + job.id + '" ' +
+                        'style="margin-left:8px;white-space:nowrap" ' +
+                        'onclick="CV._executeDownload(\'' + job.id + '\',\'' + this.esc(job.name).replace(/'/g, "\\'") + '\')">' +
+                        '<i class="bi bi-download"></i> Baixar</button>');
+                }
+
+                // Also show SweetAlert notification
+                const elapsed = Math.round((Date.now() - job.startTime) / 1000);
+                const min = Math.floor(elapsed / 60), sec = elapsed % 60;
+                Swal.fire({
+                    title: 'Download pronto!',
+                    html: '<b>' + this.esc(job.name) + '.zip</b><br>' +
+                          this.formatSize(s.size) + ' \u2014 ' + s.total.toLocaleString() + ' arquivo(s)<br>' +
+                          '<span style="font-size:12px;color:var(--text-muted)">Preparado em ' + (min ? min + 'min ' : '') + sec + 's</span>',
+                    icon: 'success',
+                    confirmButtonText: 'Baixar agora',
+                    showCancelButton: true,
+                    cancelButtonText: 'Depois',
+                    confirmButtonColor: 'var(--accent)',
+                    background: 'var(--bg-modal)', color: 'var(--text-primary)',
+                    customClass: { popup: 'swal-custom-popup', confirmButton: 'swal-confirm-btn', cancelButton: 'swal-cancel-btn' }
+                }).then((result) => {
+                    if (result.isConfirmed) {
+                        this._executeDownload(job.id, job.name);
+                    }
+                });
+            }
+            else if (s.status === 'error') {
+                if (bar) { bar.style.width = '100%'; bar.style.background = 'var(--danger)'; }
+                if (pctEl) pctEl.innerHTML = '<i class="bi bi-x-circle" style="color:var(--danger)"></i>';
+                if (detail) detail.textContent = 'Erro: ' + (s.current || 'desconhecido');
+                if (headerBar) { headerBar.style.width = '100%'; headerBar.style.background = 'var(--danger)'; }
+                if (headerTitle) headerTitle.textContent = 'Erro na preparação';
+                document.getElementById('uqIcon').className = 'bi bi-exclamation-circle';
+                document.getElementById('uqIcon').style.color = 'var(--danger)';
+                this._dlJobs = this._dlJobs.filter(j => j.id !== job.id);
+            }
+            else {
+                // Still queued
+                setTimeout(poll, 2000);
+            }
+        };
+
+        setTimeout(poll, 2000);
+    },
+
+    _executeDownload(jobId, name) {
+        const a = document.createElement('a');
+        a.href = 'api/download.php?zip_token=' + encodeURIComponent(jobId) + '&name=' + encodeURIComponent(name);
+        a.download = name + '.zip';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+
+        // Remove from jobs list
+        this._dlJobs = this._dlJobs.filter(j => j.id !== jobId);
+
+        // Update panel
+        const btn = document.getElementById('dlbtn_' + jobId);
+        if (btn) btn.textContent = 'Baixando...';
+
+        this.toast('Download iniciado!', 'success');
     },
 
     // ==================== SHARE MODAL ====================
