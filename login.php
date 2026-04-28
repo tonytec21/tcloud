@@ -43,9 +43,9 @@ $msg = $_GET['msg'] ?? '';
                 <i class="bi bi-box-arrow-in-right"></i> Entrar
             </button>
         </form>
-        <div style="text-align:center; margin-top:20px; font-size:12px; color:var(--text-muted);">
+        <!-- <div style="text-align:center; margin-top:20px; font-size:12px; color:var(--text-muted);">
             Usuário padrão: <strong>admin</strong> / Senha: <strong>Admin@123</strong>
-        </div>
+        </div> -->
     </div>
 </div>
 <script>
